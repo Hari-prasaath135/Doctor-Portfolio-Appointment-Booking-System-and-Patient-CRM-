@@ -422,6 +422,74 @@ export interface ZoomMeetingResponse {
   duration: number;
 }
 
+// ─── Analytics & Dashboard Insights ──────────────────────────────────────────
+
+export type AnalyticsEventType =
+  | 'page_view'
+  | 'appointment_page_view'
+  | 'booking_started'
+  | 'consultation_selected'
+  | 'date_selected'
+  | 'slot_selected'
+  | 'booking_submitted'
+  | 'booking_failed'
+  | 'contact_form_submitted';
+
+export interface AnalyticsEvent {
+  id: string;
+  eventType: AnalyticsEventType;
+  path: string;
+  sessionId: string;
+  consultationType?: string;
+  outcome?: 'success' | 'failure';
+  timestamp: FirebaseFirestore.Timestamp;
+}
+
+export interface DashboardInsights {
+  traffic: {
+    totalPageViews: number;
+    estimatedUniqueVisitors: number;
+    appointmentPageVisits: number;
+    contactPageVisits: number;
+    weeklyVisits: { day: string; visits: number }[];
+    popularPages: { path: string; views: number }[];
+  };
+  funnel: {
+    bookingStarts: number;
+    consultationSelections: number;
+    bookingSubmissions: number;
+    conversionRate: number; // percentage (submissions / starts)
+  };
+  appointments: {
+    total: number;
+    byStatus: Record<AppointmentStatus, number>;
+    activeList: {
+      id: string;
+      patientName: string;
+      date: string;
+      time: string;
+      doctor: string;
+      status: string;
+      serviceName: string;
+      amount: number;
+    }[];
+  };
+  inquiries: {
+    total: number;
+    pending: number;
+    reviewed: number;
+  };
+  recentActivity: {
+    id: string;
+    type: string;
+    message: string;
+    timeAgo: string;
+    timestamp: string;
+  }[];
+  trackingStartedAt: string;
+  lastUpdated: string;
+}
+
 // ─── Admin Stats ──────────────────────────────────────────────────────────────
 
 export interface AdminStats {

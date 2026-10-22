@@ -4,6 +4,7 @@ import { useState } from "react"
 import { db } from "@/lib/firebase"
 import { collection, addDoc, serverTimestamp } from "firebase/firestore"
 import { Mail, Phone, User, MessageSquare, CheckCircle2, Loader2 } from "lucide-react"
+import { trackEvent } from "@/lib/analytics"
 
 interface FormState {
   name: string
@@ -49,6 +50,11 @@ export default function ContactSection() {
         message: form.message.trim(),
         status: "pending",
         createdAt: serverTimestamp(),
+      })
+      trackEvent({
+        eventType: "contact_form_submitted",
+        path: "/contact",
+        outcome: "success",
       })
       setSubmitted(true)
       setForm(initialForm)

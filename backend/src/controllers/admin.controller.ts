@@ -13,6 +13,15 @@ export class AdminController {
     }
   }
 
+  async getDashboardInsights(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const insights = await adminService.getDashboardInsights();
+      sendSuccess(res, insights);
+    } catch (err) {
+      next(err);
+    }
+  }
+
   async listUsers(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const { page = '1', limit = '20' } =

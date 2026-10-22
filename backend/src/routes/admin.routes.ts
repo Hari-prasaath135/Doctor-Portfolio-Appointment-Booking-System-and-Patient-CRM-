@@ -8,6 +8,7 @@ const router = Router();
 router.use(authenticate, requireAdmin);
 
 router.get('/stats', adminController.getDashboardStats);
+router.get('/insights', adminController.getDashboardInsights);
 router.get('/users', adminController.listUsers);
 router.put('/users/:id/role', adminController.assignRole);
 router.put('/users/:id/toggle', adminController.toggleUserAccount);

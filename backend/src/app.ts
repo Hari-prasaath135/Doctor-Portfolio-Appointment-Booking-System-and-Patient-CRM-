@@ -18,6 +18,7 @@ import medicalHistoryRoutes from './routes/medicalHistory.routes';
 import queryRoutes from './routes/query.routes';
 import notificationRoutes from './routes/notification.routes';
 import adminRoutes from './routes/admin.routes';
+import analyticsRoutes from './routes/analytics.routes';
 
 import { AppError } from './utils/errors';
 import { logger } from './utils/logger';
@@ -53,6 +54,7 @@ app.use('/api/v1/medical-history', medicalHistoryRoutes);
 app.use('/api/v1/queries', queryRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/analytics', analyticsRoutes);
 
 // 404 Handler
 app.use((_req: Request, res: Response) => {

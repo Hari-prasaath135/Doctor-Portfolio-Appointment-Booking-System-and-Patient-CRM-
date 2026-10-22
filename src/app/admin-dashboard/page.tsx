@@ -19,6 +19,8 @@ import {
   ChevronDown,
   Stethoscope,
   ArrowUpRight,
+  RefreshCw,
+  AlertTriangle,
 } from "lucide-react"
 import {
   LineChart,
@@ -84,83 +86,82 @@ interface AppointmentSlot {
   time: string
 }
 
-type AppointmentStatus = "booked"
-interface ActiveAppointment {
-  id: string
-  patientName: string
-  date: string
-  time: string
-  doctor: string
-  status: AppointmentStatus
+
+interface RealDashboardInsights {
+  traffic: {
+    totalPageViews: number
+    estimatedUniqueVisitors: number
+    appointmentPageVisits: number
+    contactPageVisits: number
+    weeklyVisits: { day: string; visits: number }[]
+    popularPages: { path: string; views: number }[]
+  }
+  funnel: {
+    bookingStarts: number
+    consultationSelections: number
+    bookingSubmissions: number
+    conversionRate: number
+  }
+  appointments: {
+    total: number
+    byStatus: Record<string, number>
+    activeList: {
+      id: string
+      patientName: string
+      date: string
+      time: string
+      doctor: string
+      status: string
+      serviceName: string
+      amount: number
+    }[]
+  }
+  inquiries: {
+    total: number
+    pending: number
+    reviewed: number
+  }
+  recentActivity: {
+    id: string
+    type: string
+    message: string
+    timeAgo: string
+    timestamp: string
+  }[]
+  trackingStartedAt: string
+  lastUpdated: string
 }
 
-interface ActivityItem {
-  id: string
-  message: string
-  time: string
-  icon: React.ElementType
-  tint: string
+// Initial empty state (no fabricated data)
+const emptyInsights: RealDashboardInsights = {
+  traffic: {
+    totalPageViews: 0,
+    estimatedUniqueVisitors: 0,
+    appointmentPageVisits: 0,
+    contactPageVisits: 0,
+    weeklyVisits: [],
+    popularPages: [],
+  },
+  funnel: {
+    bookingStarts: 0,
+    consultationSelections: 0,
+    bookingSubmissions: 0,
+    conversionRate: 0,
+  },
+  appointments: {
+    total: 0,
+    byStatus: {},
+    activeList: [],
+  },
+  inquiries: {
+    total: 0,
+    pending: 0,
+    reviewed: 0,
+  },
+  recentActivity: [],
+  trackingStartedAt: "2026-10-22T00:00:00.000Z",
+  lastUpdated: new Date().toISOString(),
 }
-
-// ---------- Mock Data (slots, appointments, activity — not yet wired to Firestore) ----------
-const weeklyVisits: DailyVisit[] = [
-  { day: "Aug 31", visits: 210 },
-  { day: "Sep 1", visits: 260 },
-  { day: "Sep 2", visits: 300 },
-  { day: "Sep 3", visits: 340 },
-  { day: "Sep 4", visits: 360 },
-  { day: "Sep 5", visits: 300 },
-  { day: "Sep 6", visits: 410 },
-]
-
-const initialSlots: AppointmentSlot[] = [
-  { id: "s1", date: "Mon, 8 Sep", time: "09:00 AM" },
-  { id: "s2", date: "Mon, 8 Sep", time: "09:30 AM" },
-  { id: "s3", date: "Tue, 9 Sep", time: "10:00 AM" },
-]
-
-const activeAppointments: ActiveAppointment[] = [
-  {
-    id: "a1",
-    patientName: "Aarav Menon",
-    date: "Mon 8 Sep",
-    time: "09:30 AM",
-    doctor: "Dr. Vijay",
-    status: "booked",
-  },
-  {
-    id: "a2",
-    patientName: "Priya Suresh",
-    date: "Mon 8 Sep",
-    time: "11:00 AM",
-    doctor: "Dr. Vijay",
-    status: "booked",
-  },
-]
-
-const recentActivity: ActivityItem[] = [
-  {
-    id: "n1",
-    message: "New query submitted",
-    time: "2h ago",
-    icon: MessageSquare,
-    tint: "bg-amber-50 text-amber-600",
-  },
-  {
-    id: "n2",
-    message: "Aarav Menon booked a new appointment",
-    time: "4h ago",
-    icon: CalendarCheck,
-    tint: "bg-emerald-50 text-emerald-600",
-  },
-  {
-    id: "n3",
-    message: "3 new slots added for next week",
-    time: "1d ago",
-    icon: CalendarPlus,
-    tint: "bg-soft-sky text-medical-blue",
-  },
-]
 
 // ---------- Component ----------
 type TabKey = "overview" | "queries" | "slots" | "active"
@@ -178,9 +179,55 @@ function AdminDashboardContent() {
   const [profileOpen, setProfileOpen] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [queries, setQueries] = useState<PatientQuery[]>([])
-  const [slots, setSlots] = useState(initialSlots)
+  const [slots, setSlots] = useState<AppointmentSlot[]>([])
   const [newDate, setNewDate] = useState("")
   const [newTime, setNewTime] = useState("")
+
+  // Real Insights State from Backend API
+  const [insights, setInsights] = useState<RealDashboardInsights>(emptyInsights)
+  const [loadingInsights, setLoadingInsights] = useState(true)
+  const [insightsError, setInsightsError] = useState<string | null>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const { getIdToken } = useAuth()
+
+  const fetchInsights = async (isManual = false) => {
+    if (isManual) setIsRefreshing(true)
+    setInsightsError(null)
+
+    try {
+      const token = await getIdToken()
+      if (!token) return
+
+      const res = await fetch("http://localhost:5000/api/v1/admin/insights", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (!res.ok) {
+        throw new Error("Failed to load dashboard insights")
+      }
+
+      const json = await res.json()
+      if (json.data) {
+        setInsights(json.data)
+      }
+    } catch (err: any) {
+      console.error("Dashboard insights error:", err)
+      setInsightsError(err.message || "Could not connect to analytics service")
+    } finally {
+      setLoadingInsights(false)
+      setIsRefreshing(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchInsights()
+    // Periodic refresh every 30 seconds for live monitoring
+    const timer = setInterval(() => fetchInsights(), 30000)
+    return () => clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => setMounted(true))
@@ -219,17 +266,17 @@ function AdminDashboardContent() {
 
   const visitorStats: VisitorStat[] = [
     {
-      label: "Total Visits",
-      value: "12,480",
-      change: "+8.2% this week",
+      label: "Total Page Views",
+      value: String(insights.traffic.totalPageViews),
+      change: `${insights.traffic.appointmentPageVisits} booking visits`,
       positive: true,
       icon: Eye,
       tint: "bg-blue-50 text-blue-600",
     },
     {
       label: "Unique Visitors",
-      value: "4,032",
-      change: "+3.6% this week",
+      value: String(insights.traffic.estimatedUniqueVisitors),
+      change: "Estimated by session",
       positive: true,
       icon: Users,
       tint: "bg-purple-50 text-purple-600",
@@ -244,15 +291,14 @@ function AdminDashboardContent() {
     },
     {
       label: "Active Appointments",
-      value: String(activeAppointments.length),
-      change: "Across all doctors",
+      value: String(insights.appointments.total),
+      change: `${insights.appointments.byStatus["CONFIRMED"] || 0} confirmed`,
       positive: true,
       icon: CalendarCheck,
       tint: "bg-emerald-50 text-emerald-600",
     },
   ]
 
-  const { getIdToken } = useAuth()
   const [isSavingSchedule, setIsSavingSchedule] = useState(false)
   const [scheduleSuccessMsg, setScheduleSuccessMsg] = useState<string | null>(null)
   const [scheduleErrorMsg, setScheduleErrorMsg] = useState<string | null>(null)
@@ -424,33 +470,41 @@ function AdminDashboardContent() {
                   aria-label="Notifications"
                 >
                   <Bell className="w-5 h-5 text-deep-trust" />
-                  {recentActivity.length > 0 && (
-                    <span className="absolute top-1.5 right-1.5 w-4 h-4 flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full">
-                      {recentActivity.length}
+                  {insights.recentActivity.length > 0 && (
+                    <span className="absolute top-1.5 right-1.5 w-4 h-4 flex items-center justify-center text-[10px] font-bold text-white bg-medical-blue rounded-full">
+                      {insights.recentActivity.length}
                     </span>
                   )}
                 </button>
 
                 {notifOpen && (
                   <div className="absolute right-0 mt-2 w-80 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden z-40">
-                    <div className="px-4 py-3 border-b border-gray-100 font-heading font-semibold text-deep-trust text-sm">
-                      Recent Activity
+                    <div className="px-4 py-3 border-b border-gray-100 font-heading font-semibold text-deep-trust text-sm flex items-center justify-between">
+                      <span>Recent Activity</span>
+                      <span className="text-[11px] font-normal text-text-secondary">Persisted Events</span>
                     </div>
                     <div className="max-h-72 overflow-y-auto">
-                      {recentActivity.map((n) => (
+                      {insights.recentActivity.map((n) => (
                         <div
                           key={n.id}
                           className="flex items-start gap-3 px-4 py-3 border-b border-gray-50 last:border-0 hover:bg-soft-sky/40 transition-colors"
                         >
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${n.tint}`}>
-                            <n.icon className="w-4 h-4" />
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                            n.type === "APPOINTMENT" ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"
+                          }`}>
+                            {n.type === "APPOINTMENT" ? <CalendarCheck className="w-4 h-4" /> : <MessageSquare className="w-4 h-4" />}
                           </div>
                           <div className="min-w-0">
-                            <p className="text-sm text-text-primary">{n.message}</p>
-                            <p className="text-xs text-text-secondary mt-0.5">{n.time}</p>
+                            <p className="text-sm text-text-primary leading-tight">{n.message}</p>
+                            <p className="text-xs text-text-secondary mt-1">{n.timeAgo}</p>
                           </div>
                         </div>
                       ))}
+                      {insights.recentActivity.length === 0 && (
+                        <div className="py-8 text-center text-xs text-text-secondary">
+                          No recent activity recorded yet.
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -485,14 +539,44 @@ function AdminDashboardContent() {
           {/* --- Overview / Dashboard Tab --- */}
           {activeTab === "overview" && (
             <>
-              <div>
-                <h1 className="font-heading font-bold text-2xl text-deep-trust">
-                  Admin Dashboard
-                </h1>
-                <p className="text-text-secondary text-sm mt-1">
-                  Overview of clinic activity and website performance
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h1 className="font-heading font-bold text-2xl text-deep-trust">
+                    Admin Dashboard
+                  </h1>
+                  <p className="text-text-secondary text-sm mt-1">
+                    Live analytics and authoritative clinic activity (Tracking active since {new Date(insights.trackingStartedAt).toLocaleDateString()})
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-text-secondary">
+                    Updated: {new Date(insights.lastUpdated).toLocaleTimeString()}
+                  </span>
+                  <button
+                    onClick={() => fetchInsights(true)}
+                    disabled={isRefreshing}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-white border border-gray-200 hover:bg-soft-sky/40 text-deep-trust text-xs font-semibold rounded-xl shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin text-medical-blue" : ""}`} />
+                    Refresh
+                  </button>
+                </div>
               </div>
+
+              {insightsError && (
+                <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-medium flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0" />
+                    <span>{insightsError}</span>
+                  </div>
+                  <button
+                    onClick={() => fetchInsights(true)}
+                    className="underline text-red-700 hover:text-red-900 font-semibold cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               {/* Stat cards */}
               <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -522,39 +606,82 @@ function AdminDashboardContent() {
                 ))}
               </div>
 
+              {/* Booking Funnel Row */}
+              <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-heading font-bold text-base text-deep-trust">
+                    Patient Booking Funnel (First-Party Conversion)
+                  </h2>
+                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-soft-sky text-medical-blue">
+                    Conversion Rate: {insights.funnel.conversionRate}%
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-3.5 rounded-xl bg-soft-sky/30 border border-medical-blue/10">
+                    <p className="text-xs text-text-secondary">Booking Starts</p>
+                    <p className="font-heading font-bold text-xl text-deep-trust mt-1">
+                      {insights.funnel.bookingStarts}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-soft-sky/30 border border-medical-blue/10">
+                    <p className="text-xs text-text-secondary">Consultation Selected</p>
+                    <p className="font-heading font-bold text-xl text-deep-trust mt-1">
+                      {insights.funnel.consultationSelections}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-emerald-50/50 border border-emerald-100">
+                    <p className="text-xs text-emerald-800">Booking Submissions</p>
+                    <p className="font-heading font-bold text-xl text-emerald-700 mt-1">
+                      {insights.funnel.bookingSubmissions}
+                    </p>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-purple-50/50 border border-purple-100">
+                    <p className="text-xs text-purple-800">Appointment Visits</p>
+                    <p className="font-heading font-bold text-xl text-purple-700 mt-1">
+                      {insights.traffic.appointmentPageVisits}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               {/* Charts row */}
               <div className="grid lg:grid-cols-3 gap-6">
                 <div className="lg:col-span-2 bg-white rounded-2xl shadow-md border border-gray-100 p-6">
-                  <h2 className="font-heading font-bold text-lg text-deep-trust mb-4">
-                    Website Visits — Last 7 Days
-                  </h2>
-                  <div className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={weeklyVisits}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                        <XAxis dataKey="day" tick={{ fontSize: 12, fill: "#64748b" }} />
-                        <YAxis tick={{ fontSize: 12, fill: "#64748b" }} />
-                        <Tooltip
-                          contentStyle={{
-                            borderRadius: "0.75rem",
-                            border: "1px solid #e2e8f0",
-                            fontSize: "0.75rem",
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="visits"
-                          stroke="#2563eb"
-                          strokeWidth={2.5}
-                          dot={{ r: 4, fill: "#2563eb" }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-heading font-bold text-lg text-deep-trust">
+                      Website Visits — Last 7 Days
+                    </h2>
+                    <span className="text-xs text-text-secondary">Deduplicated Page Views</span>
                   </div>
-                  <p className="text-xs text-text-secondary mt-3">
-                    Replace with a real analytics source (Google Analytics API,
-                    Firestore visit logs) once visitor tracking is wired up.
-                  </p>
+                  <div className="h-64">
+                    {insights.traffic.weeklyVisits.length > 0 ? (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={insights.traffic.weeklyVisits}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                          <XAxis dataKey="day" tick={{ fontSize: 12, fill: "#64748b" }} />
+                          <YAxis tick={{ fontSize: 12, fill: "#64748b" }} />
+                          <Tooltip
+                            contentStyle={{
+                              borderRadius: "0.75rem",
+                              border: "1px solid #e2e8f0",
+                              fontSize: "0.75rem",
+                            }}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="visits"
+                            stroke="#2563eb"
+                            strokeWidth={2.5}
+                            dot={{ r: 4, fill: "#2563eb" }}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-xs text-text-secondary">
+                        No traffic events recorded in this period yet.
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-6 flex flex-col">
@@ -626,7 +753,7 @@ function AdminDashboardContent() {
                         </tr>
                       </thead>
                       <tbody>
-                        {activeAppointments.map((appt) => (
+                        {insights.appointments.activeList.map((appt) => (
                           <tr key={appt.id} className="border-b border-gray-50 last:border-0">
                             <td className="py-3 font-medium text-deep-trust">
                               {appt.patientName}
@@ -636,14 +763,23 @@ function AdminDashboardContent() {
                               {appt.date}, {appt.time}
                             </td>
                             <td className="py-3">
-                              <span className="px-3 py-1 rounded-full text-xs font-medium bg-soft-sky text-medical-blue">
-                                Booked
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+                                appt.status === "CONFIRMED"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-amber-50 text-amber-700"
+                              }`}>
+                                {appt.status}
                               </span>
                             </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
+                    {insights.appointments.activeList.length === 0 && (
+                      <div className="py-8 text-center text-xs text-text-secondary">
+                        No appointments booked yet.
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -941,7 +1077,7 @@ function AdminDashboardContent() {
                 Active Booked Appointments
               </h2>
               <div className="space-y-3">
-                {activeAppointments.map((appt) => (
+                {insights.appointments.activeList.map((appt) => (
                   <div
                     key={appt.id}
                     className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-xl border border-gray-100 hover:bg-soft-sky/30 transition-colors"
@@ -950,24 +1086,28 @@ function AdminDashboardContent() {
                       <p className="font-medium text-deep-trust text-sm">
                         {appt.patientName}
                       </p>
-                      <p className="text-text-secondary text-xs">with {appt.doctor}</p>
+                      <p className="text-text-secondary text-xs">with {appt.doctor} • {appt.serviceName || "Consultation"}</p>
                     </div>
                     <div className="flex items-center gap-4">
                       <div className="text-right">
                         <p className="text-sm font-medium text-deep-trust">{appt.date}</p>
                         <p className="text-xs text-text-secondary">{appt.time}</p>
                       </div>
-                      <span className="flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium bg-soft-sky text-medical-blue whitespace-nowrap">
+                      <span className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap ${
+                        appt.status === "CONFIRMED"
+                          ? "bg-emerald-50 text-emerald-700"
+                          : "bg-amber-50 text-amber-700"
+                      }`}>
                         <CalendarCheck className="w-3 h-3" />
-                        Booked
+                        {appt.status}
                       </span>
                     </div>
                   </div>
                 ))}
-                {activeAppointments.length === 0 && (
-                  <p className="text-text-secondary text-sm">
-                    No active appointments booked right now.
-                  </p>
+                {insights.appointments.activeList.length === 0 && (
+                  <div className="py-12 text-center text-sm text-text-secondary">
+                    No active appointments recorded in the system.
+                  </div>
                 )}
               </div>
             </div>

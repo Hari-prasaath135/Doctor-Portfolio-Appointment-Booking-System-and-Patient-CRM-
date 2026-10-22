@@ -6,6 +6,7 @@ import SiteChrome from "@/components/layout/SiteChrome"
 import SmoothScroll from "@/components/layout/SmoothScroll"
 import Providers from "@/components/Providers"
 import SplashScreen from "@/components/SplashScreen"
+import AnalyticsTracker from "@/components/AnalyticsTracker"
 
 const plusJakartaSans = Plus_Jakarta_Sans({
   subsets: ["latin"],
@@ -55,6 +56,7 @@ export default function RootLayout({
       <body className="font-body antialiased">
         <SplashScreen>
           <Providers>
+            <AnalyticsTracker />
             <SmoothScroll>
               <SiteChrome>{children}</SiteChrome>
             </SmoothScroll>

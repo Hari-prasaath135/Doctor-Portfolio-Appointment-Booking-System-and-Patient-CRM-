@@ -127,5 +127,13 @@ service cloud.firestore {
       allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
       allow create, delete: if isDoctorOrAdmin();
     }
+
+    // Website Analytics: Ingested exclusively via Express Backend Admin SDK
+    // Client SDK direct access is restricted to Admins for reading
+    match /analytics/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false; // All event creation & retention managed strictly by server Admin SDK
+    }
   }
 }
+

@@ -28,6 +28,7 @@ import { Label } from "@/components/ui/label"
 import { doctorInfo } from "@/lib/data"
 import { auth } from "@/lib/firebase-client"
 import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth"
+import { trackEvent } from "@/lib/analytics"
 
 export type ConsultationType = "IN_PERSON" | "VIDEO" | "FOLLOW_UP"
 
@@ -343,6 +344,25 @@ export default function BookingWizard() {
 
   const handleNext = () => {
     if (validateCurrentStep()) {
+      if (currentStep === 1) {
+        trackEvent({
+          eventType: "booking_started",
+          consultationType: booking.consultationType,
+        })
+        trackEvent({
+          eventType: "consultation_selected",
+          consultationType: booking.consultationType,
+        })
+      } else if (currentStep === 2) {
+        trackEvent({
+          eventType: "date_selected",
+          consultationType: booking.consultationType,
+        })
+        trackEvent({
+          eventType: "slot_selected",
+          consultationType: booking.consultationType,
+        })
+      }
       setCurrentStep((prev) => Math.min(4, prev + 1))
     }
   }
@@ -394,15 +414,31 @@ export default function BookingWizard() {
       const data = await res.json()
 
       if (!res.ok) {
+        trackEvent({
+          eventType: "booking_failed",
+          consultationType: booking.consultationType,
+          outcome: "failure",
+        })
         throw new Error(data.error || "Failed to reserve appointment slot")
       }
 
       const createdAppointment = data.data
+      trackEvent({
+        eventType: "booking_submitted",
+        consultationType: booking.consultationType,
+        outcome: "success",
+      })
+
       setReservationSuccess({
         appointmentId: createdAppointment.id,
         fee: createdAppointment.feeInPaise || selectedConfig.feeInPaise,
       })
     } catch (err: any) {
+      trackEvent({
+        eventType: "booking_failed",
+        consultationType: booking.consultationType,
+        outcome: "failure",
+      })
       setErrors({
         submit: err.message || "Slot could not be reserved. Please select another slot.",
       })

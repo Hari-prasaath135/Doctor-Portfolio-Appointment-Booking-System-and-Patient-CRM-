@@ -75,4 +75,6 @@ export const collections = {
   notifications: 'notifications',
   availability: 'availability',
   meetingDetails: 'meetingDetails',
+  analytics: 'analytics',
+  enquiries: 'enquiries',
 } as const;
