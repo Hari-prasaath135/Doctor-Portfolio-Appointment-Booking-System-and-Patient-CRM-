@@ -35,6 +35,9 @@ import {
 import { db } from "@/lib/firebase"
 import { collection, query, orderBy, onSnapshot, doc, updateDoc, Timestamp } from "firebase/firestore"
 import ProtectedRoute from "@/components/auth/ProtectedRoute"
+import { useAuth } from "@/lib/auth-context"
+import { doctorInfo } from "@/lib/data"
+import { Loader2 } from "lucide-react"
 
 // ---------- Helpers ----------
 function timeAgo(timestamp: Timestamp | null | undefined): string {
@@ -249,26 +252,109 @@ function AdminDashboardContent() {
     },
   ]
 
+  const { getIdToken } = useAuth()
+  const [isSavingSchedule, setIsSavingSchedule] = useState(false)
+  const [scheduleSuccessMsg, setScheduleSuccessMsg] = useState<string | null>(null)
+  const [scheduleErrorMsg, setScheduleErrorMsg] = useState<string | null>(null)
+
+  // Fetch real configured slots for selected date
+  const loadSlotsForDate = async (dateStr: string) => {
+    if (!dateStr) return
+    try {
+      const res = await fetch(`http://localhost:5000/api/v1/availability/slots?doctorId=${doctorInfo.id}&date=${dateStr}`)
+      if (res.ok) {
+        const json = await res.json()
+        const data = json.data
+        if (data && data.slots) {
+          setSlots(
+            data.slots.map((s: any, idx: number) => ({
+              id: `slot-${idx}`,
+              date: dateStr,
+              time: s.time,
+            }))
+          )
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load slots for date", err)
+    }
+  }
+
+  useEffect(() => {
+    if (newDate) {
+      loadSlotsForDate(newDate)
+    }
+  }, [newDate])
+
+  const saveFullSchedule = async () => {
+    if (!newDate) {
+      setScheduleErrorMsg("Please select a schedule date.")
+      return
+    }
+
+    setIsSavingSchedule(true)
+    setScheduleSuccessMsg(null)
+    setScheduleErrorMsg(null)
+
+    try {
+      const startTime = (document.getElementById("sched-start-time") as HTMLInputElement)?.value || "09:00"
+      const endTime = (document.getElementById("sched-end-time") as HTMLInputElement)?.value || "17:00"
+      const duration = parseInt((document.getElementById("sched-duration") as HTMLSelectElement)?.value || "30")
+      const buffer = parseInt((document.getElementById("sched-buffer") as HTMLSelectElement)?.value || "10")
+      const feeInPerson = parseInt((document.getElementById("sched-fee-inperson") as HTMLInputElement)?.value || "1000") * 100
+      const feeVideo = parseInt((document.getElementById("sched-fee-video") as HTMLInputElement)?.value || "800") * 100
+      const isPublished = (document.getElementById("sched-published") as HTMLInputElement)?.checked ?? true
+
+      const token = await getIdToken()
+
+      const res = await fetch("http://localhost:5000/api/v1/availability/schedule", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          doctorId: doctorInfo.id,
+          date: newDate,
+          startTime,
+          endTime,
+          slotDurationMinutes: duration,
+          bufferMinutes: buffer,
+          consultationTypes: [
+            { type: "IN_PERSON", feeInPaise: feeInPerson, durationMinutes: duration },
+            { type: "VIDEO", feeInPaise: feeVideo, durationMinutes: duration },
+            { type: "FOLLOW_UP", feeInPaise: Math.round(feeInPerson * 0.6), durationMinutes: Math.max(15, duration - 10) },
+          ],
+          isPublished,
+        }),
+      })
+
+      if (res.ok) {
+        const json = await res.json()
+        const count = json.data?.totalSlots || 0
+        setScheduleSuccessMsg(`Successfully generated ${count} slots for ${newDate}. Published immediately to patient booking!`)
+        await loadSlotsForDate(newDate)
+      } else {
+        const errJson = await res.json()
+        setScheduleErrorMsg(errJson.error || "Failed to create schedule")
+      }
+    } catch (err: any) {
+      setScheduleErrorMsg(err?.message || "Network error while saving schedule")
+    } finally {
+      setIsSavingSchedule(false)
+    }
+  }
+
   const markReviewed = async (id: string) => {
     try {
       await updateDoc(doc(db, "enquiries", id), { status: "reviewed" })
-      // No manual setQueries needed — onSnapshot picks up the change
     } catch (err) {
       console.error("Failed to mark enquiry as reviewed", err)
     }
   }
 
   const addSlot = () => {
-    if (!newDate || !newTime) return
-    // TODO: replace with a real API call that pushes this slot to both
-    // the general booking availability endpoint and the doctor dashboard's
-    // slot list, so they stay in sync.
-    setSlots((prev) => [
-      ...prev,
-      { id: `s${prev.length + 1}`, date: newDate, time: newTime },
-    ])
-    setNewDate("")
-    setNewTime("")
+    saveFullSchedule()
   }
 
   const removeSlot = (id: string) => {
@@ -770,13 +856,37 @@ function AdminDashboardContent() {
                   <div className="flex items-center gap-3">
                     <button
                       onClick={addSlot}
-                      className="flex items-center gap-2 px-5 py-2.5 bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl text-sm font-semibold shadow-md transition-all cursor-pointer"
+                      disabled={isSavingSchedule}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl text-sm font-semibold shadow-md transition-all cursor-pointer disabled:opacity-60"
                     >
-                      <Plus className="w-4 h-4" />
-                      Save &amp; Generate Schedule
+                      {isSavingSchedule ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Generating...
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="w-4 h-4" />
+                          Save &amp; Generate Schedule
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>
+
+                {scheduleSuccessMsg && (
+                  <div className="mt-4 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                    {scheduleSuccessMsg}
+                  </div>
+                )}
+
+                {scheduleErrorMsg && (
+                  <div className="mt-4 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-medium flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-red-600 flex-shrink-0" />
+                    {scheduleErrorMsg}
+                  </div>
+                )}
               </div>
 
               {/* Existing Configured Slots & Blocking */}
