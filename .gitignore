@@ -1,8 +1,6 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# dependencies
-/node_modules
-/.pnp
+# Dependencies — Node.js
+node_modules/
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -10,32 +8,51 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
 
-# next.js
-/.next/
-/out/
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# production
-/build
-
-# misc
-.DS_Store
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
 *.pem
+*firebase-service-account*.json
+*service-account*.json
+backend/firebase-service-account.json
+src/firebase-service-account.json
+firebase-service-account.json
 
-# debug
+# Testing
+coverage/
+
+# Next.js
+.next/
+out/
+
+# Production builds
+build/
+dist/
+
+# Debug logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# Miscellaneous
+.DS_Store
+.vercel/
 
-# vercel
-.vercel
-
-# typescript
+# TypeScript
 *.tsbuildinfo
 next-env.d.ts

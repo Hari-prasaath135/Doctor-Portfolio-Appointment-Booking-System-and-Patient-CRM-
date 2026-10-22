@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated() && request.auth.token.role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('ADMIN');
+    }
+
+    function isDoctor() {
+      return hasRole('DOCTOR');
+    }
+
+    function isDoctorOrAdmin() {
+      return isAdmin() || isDoctor();
+    }
+
+    // Users Collection: Profiles and Roles
+    match /users/{userId} {
+      // Users can read their own profile; Admins can read all profiles.
+      allow read: if isOwner(userId) || isAdmin();
+      // Crucial: Ordinary users cannot self-assign or escalate roles.
+      // Profile creation is handled exclusively via Firebase Admin SDK backend endpoints.
+      allow write: if isAdmin();
+    }
+
+    // Doctors Collection: Public bio/specialties readable; modified only by Admin.
+    match /doctors/{doctorId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Availability & Schedules: Publicly readable for appointment booking; managed by Doctor or Admin.
+    match /availability/{availabilityId} {
+      allow read: if true;
+      allow write: if isDoctorOrAdmin();
+    }
+
+    // Appointments: Patients can read their own; Doctors can read their assigned appointments; Admins can read all.
+    match /appointments/{appointmentId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        resource.data.doctorId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+      // Appointment mutations (status changes, creation, transactions) run through the backend API
+      allow write: if isDoctorOrAdmin();
+    }
+
+    // Consultations & Clinical Notes: Patients can read their own consultations; Doctors & Admins manage them.
+    match /consultations/{consultationId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        resource.data.doctorId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+      allow write: if isDoctorOrAdmin();
+    }
+
+    // Prescriptions: Patients read their own; Doctors/Admins create/update.
+    match /prescriptions/{prescriptionId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+      allow write: if isDoctorOrAdmin();
+    }
+
+    // Medical History & Attachments: Patients manage/read their own; Doctors & Admins can read/review.
+    match /medicalHistory/{recordId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+      allow write: if isAuthenticated() && (
+        request.resource.data.patientId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+    }
+
+    // Enquiries & Contact Queries: Patients submit queries; only Doctors and Admins can review all queries.
+    match /enquiries/{enquiryId} {
+      allow create: if true; // Public contact form submission
+      allow read, update, delete: if isDoctorOrAdmin();
+    }
+
+    match /patientQueries/{queryId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        isDoctorOrAdmin()
+      );
+      allow create: if isAuthenticated() && request.resource.data.patientId == request.auth.uid;
+      allow update, delete: if isDoctorOrAdmin();
+    }
+
+    // Payments & Refunds: Only owner patient or Admin can view.
+    match /payments/{paymentId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow write: if isAdmin();
+    }
+
+    match /refunds/{refundId} {
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow write: if isAdmin();
+    }
+
+    // Notifications: User can only read and update their own notifications.
+    match /notifications/{notificationId} {
+      allow read, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create, delete: if isDoctorOrAdmin();
+    }
+  }
+}

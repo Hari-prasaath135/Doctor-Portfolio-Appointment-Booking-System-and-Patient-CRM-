@@ -1,0 +1,35 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && request.auth.token.role == 'ADMIN';
+    }
+
+    function isDoctor() {
+      return isAuthenticated() && request.auth.token.role == 'DOCTOR';
+    }
+
+    function isDoctorOrAdmin() {
+      return isAdmin() || isDoctor();
+    }
+
+    // Patient medical records and attachments:
+    // Stored under patients/{patientId}/**
+    match /patients/{patientId}/{allPaths=**} {
+      // Patient can upload and read their own attachments; Doctors & Admins can access them for clinical review
+      allow read: if isAuthenticated() && (request.auth.uid == patientId || isDoctorOrAdmin());
+      allow write: if isAuthenticated() && (request.auth.uid == patientId || isDoctorOrAdmin());
+    }
+
+    // Clinic public assets (e.g. badges, doctor profile pictures)
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if isDoctorOrAdmin();
+    }
+  }
+}
