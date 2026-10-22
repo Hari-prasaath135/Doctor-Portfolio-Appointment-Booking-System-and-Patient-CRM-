@@ -536,6 +536,68 @@ export class NotificationService {
       // Email failures should not break the request.
     }
   }
+
+  /**
+   * Process pending notification outbox jobs.
+   * Delivers confirmation emails with bounded retries outside of the transaction.
+   */
+  async processOutboxQueue(): Promise<{ processed: number; failures: number }> {
+    const snap = await db
+      .collection(collections.notificationOutbox)
+      .where('status', 'in', ['PENDING', 'RETRY'])
+      .limit(10)
+      .get();
+
+    let processed = 0;
+    let failures = 0;
+
+    for (const doc of snap.docs) {
+      const job = doc.data();
+      const attempts = (job.attempts || 0) + 1;
+
+      try {
+        if (job.recipientEmail) {
+          await this.sendAppointmentConfirmation(
+            job.recipientEmail,
+            job.patientName || 'Patient',
+            job.appointmentDate,
+            job.appointmentTime,
+            job.serviceName || 'Consultation'
+          );
+        }
+
+        // Also create an in-app notification
+        if (job.patientId) {
+          await this.createNotification(
+            job.patientId,
+            'APPOINTMENT_CONFIRMED',
+            'Appointment Confirmed',
+            `Your appointment on ${job.appointmentDate} at ${job.appointmentTime} is confirmed.`,
+            { appointmentId: job.appointmentId }
+          );
+        }
+
+        await doc.ref.update({
+          status: 'SENT',
+          attempts,
+          sentAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        processed++;
+      } catch (err: any) {
+        failures++;
+        const nextStatus = attempts >= 3 ? 'FAILED' : 'RETRY';
+        await doc.ref.update({
+          status: nextStatus,
+          attempts,
+          lastError: err?.message || 'Email delivery failed',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
+    return { processed, failures };
+  }
 }
 
 export const notificationService = new NotificationService();

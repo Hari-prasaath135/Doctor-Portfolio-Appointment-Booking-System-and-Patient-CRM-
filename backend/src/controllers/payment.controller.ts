@@ -2,88 +2,101 @@ import { Request, Response, NextFunction } from 'express';
 import { AuthenticatedRequest } from '../types';
 import { paymentService } from '../services/payment.service';
 import { appointmentService } from '../services/appointment.service';
-import { notificationService } from '../services/notification.service';
 import { sendSuccess, sendCreated } from '../utils/response';
-import { UnauthorizedError, ForbiddenError } from '../utils/errors';
+import { UnauthorizedError, ForbiddenError, BadRequestError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
 export class PaymentController {
   /**
-   * POST /api/v1/payments/order
-   * Creates a Pinelabs payment order for an appointment.
+   * POST /api/v1/payments/orders
+   * Creates a Razorpay payment order for an authenticated patient's pending appointment.
    */
   async createOrder(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       if (!req.user) throw new UnauthorizedError();
 
-      const { appointmentId, amountInPaise, billingInfo } = req.body;
-
-      const result = await paymentService.createPaymentOrder(
-        appointmentId,
-        req.user.uid,
-        amountInPaise,
-        billingInfo
-      );
-
-      sendCreated(res, result, 'Payment order created');
-    } catch (err) {
-      next(err);
-    }
-  }
-
-  /**
-   * POST /api/v1/payments/webhook
-   * Receives Pinelabs payment status callbacks.
-   * Must be publicly accessible (no auth middleware).
-   */
-  async handleWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      logger.info('Pinelabs webhook received');
-
-      await paymentService.handleWebhook(
-        req.body as Record<string, unknown>
-      );
-
-      // After successful payment, confirm appointment
-      const merchantTxnId = (
-        req.body as Record<string, unknown>
-      ).unique_merchant_transaction_id as string;
-
-      const payment = await paymentService['getPaymentByAppointment'](
-        merchantTxnId.split('_')[1]
-      );
-
-      if (payment?.status === 'PAID') {
-        await appointmentService.confirmAppointment(payment.appointmentId);
-
-        notificationService
-          .createNotification(
-            payment.patientId,
-            'PAYMENT_SUCCESS',
-            'Payment Confirmed',
-            `Your payment of ₹${(payment.amount / 100).toFixed(2)} has been received and your appointment is confirmed.`
-          )
-          .catch(() => {});
+      const { appointmentId, idempotencyKey } = req.body;
+      if (!appointmentId) {
+        throw new BadRequestError('appointmentId is required');
       }
 
-      res.status(200).json({ received: true });
-    } catch (err) {
-      logger.error('Webhook processing error', err);
-
-      // Always respond 200 to Pinelabs to prevent retries
-      res.status(200).json({
-        received: true,
-        error: 'Processing failed',
+      const result = await paymentService.createRazorpayOrder({
+        appointmentId,
+        patientId: req.user.uid,
+        idempotencyKey,
       });
 
+      sendCreated(res, result, 'Payment order created');
+    } catch (err: any) {
+      logger.error('createOrder failed in controller', err);
       next(err);
     }
   }
 
   /**
-   * GET /api/v1/payments/:id
+   * POST /api/v1/payments/verify
+   * Verifies Razorpay checkout signature and captured payment state.
    */
-  async getPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async verifyPayment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!req.user) throw new UnauthorizedError();
+
+      const { appointmentId, razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+
+      if (!appointmentId || !razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+        throw new BadRequestError('Missing required payment verification parameters');
+      }
+
+      const result = await paymentService.verifyPayment({
+        appointmentId,
+        patientId: req.user.uid,
+        razorpayOrderId,
+        razorpayPaymentId,
+        razorpaySignature,
+      });
+
+      sendSuccess(res, result, 'Payment verified and appointment confirmed');
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/v1/webhooks/razorpay
+   * Ingests and processes Razorpay webhooks.
+   * Public endpoint, verifies X-Razorpay-Signature HMAC header using raw body.
+   */
+  async handleRazorpayWebhook(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const signature = req.headers['x-razorpay-signature'] as string;
+      if (!signature) {
+        res.status(400).json({ error: 'Missing X-Razorpay-Signature header' });
+        return;
+      }
+
+      const rawBody = (req as any).rawBody;
+      if (!rawBody) {
+        res.status(400).json({ error: 'Raw body required for webhook verification' });
+        return;
+      }
+
+      const result = await paymentService.handleRazorpayWebhook(rawBody, signature, req.body);
+      res.status(200).json({ received: true, ...result });
+    } catch (err: any) {
+      logger.error('Razorpay webhook processing error', err);
+      // If signature invalid, 400; otherwise 200/500 depending on retry intent
+      if (err instanceof BadRequestError) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: 'Webhook processing error' });
+    }
+  }
+
+  /**
+   * GET /api/v1/payments/:id/status
+   */
+  async getPaymentStatus(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       if (!req.user) throw new UnauthorizedError();
 
@@ -97,31 +110,60 @@ export class PaymentController {
         throw new ForbiddenError('You can only view your own payment records');
       }
 
-      sendSuccess(res, payment);
+      sendSuccess(res, {
+        id: payment.id,
+        appointmentId: payment.appointmentId,
+        status: payment.status,
+        amount: payment.amount,
+        currency: payment.currency,
+        orderId: payment.orderId,
+        paymentId: payment.paymentId,
+        paidAt: payment.paidAt,
+      });
     } catch (err) {
       next(err);
     }
   }
 
   /**
-   * GET /api/v1/payments/appointment/:appointmentId
+   * GET /api/v1/appointments/:id/status
    */
-  async getPaymentByAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  async getAppointmentStatus(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       if (!req.user) throw new UnauthorizedError();
 
-      const appointmentId = String(req.params.appointmentId);
-      const payment =
-        await paymentService.getPaymentByAppointment(appointmentId);
+      const id = String(req.params.id);
+      const appt = await appointmentService.getAppointmentById(id);
 
       const userRole = req.user['role'];
       const userId = req.user.uid;
 
-      if (payment && userRole === 'PATIENT' && payment.patientId !== userId) {
-        throw new ForbiddenError('You can only view your own payment records');
+      if (userRole === 'PATIENT' && appt.patientId !== userId) {
+        throw new ForbiddenError('You can only view your own appointments');
       }
 
-      sendSuccess(res, payment);
+      sendSuccess(res, {
+        id: appt.id,
+        status: appt.status,
+        doctorId: appt.doctorId,
+        date: appt.date,
+        time: appt.time,
+        serviceName: appt.serviceName,
+        paymentId: appt.paymentId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * POST /api/v1/appointments/cleanup-expired
+   * Periodic or on-demand worker to release expired slot reservations.
+   */
+  async cleanupExpiredReservations(_req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await appointmentService.releaseExpiredReservations();
+      sendSuccess(res, result, `Released ${result.releasedCount} expired slot reservations`);
     } catch (err) {
       next(err);
     }

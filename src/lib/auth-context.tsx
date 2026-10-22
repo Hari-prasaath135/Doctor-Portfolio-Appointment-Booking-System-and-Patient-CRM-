@@ -16,10 +16,10 @@ export interface AuthContextType {
   role: string | null
   error: string | null
   isSigningIn: boolean
-  signInWithGoogle: () => Promise<User | null>
+  signInWithGoogle: () => Promise<{ user: User | null; role: string | null }>
   signOut: () => Promise<void>
   clearError: () => void
-  getIdToken: () => Promise<string | null>
+  getIdToken: (forceRefresh?: boolean) => Promise<string | null>
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -28,7 +28,7 @@ const AuthContext = createContext<AuthContextType>({
   role: null,
   error: null,
   isSigningIn: false,
-  signInWithGoogle: async () => null,
+  signInWithGoogle: async () => ({ user: null, role: null }),
   signOut: async () => {},
   clearError: () => {},
   getIdToken: async () => null,
@@ -58,7 +58,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           })
           if (res.ok) {
             const json = await res.json()
-            setRole(json?.data?.role || "PATIENT")
+            const verifiedRole = json?.data?.role || "PATIENT"
+            setRole(verifiedRole)
+            // Force refresh ID token so new custom claims minted on server are available in client token
+            await firebaseUser.getIdToken(true).catch(() => {})
+          } else {
+            setRole("PATIENT")
           }
         } catch {
           setRole("PATIENT")
@@ -74,17 +79,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const clearError = () => setError(null)
 
-  const getIdToken = async (): Promise<string | null> => {
+  const getIdToken = async (forceRefresh = false): Promise<string | null> => {
     if (!auth.currentUser) return null
     try {
-      return await auth.currentUser.getIdToken()
+      return await auth.currentUser.getIdToken(forceRefresh)
     } catch {
       return null
     }
   }
 
-  const signInWithGoogle = async (): Promise<User | null> => {
-    if (isSigningIn) return null
+  const signInWithGoogle = async (): Promise<{ user: User | null; role: string | null }> => {
+    if (isSigningIn) return { user: null, role: null }
     setIsSigningIn(true)
     setError(null)
 
@@ -97,6 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const signedInUser = result.user
       setUser(signedInUser)
 
+      let authoritativeRole = "PATIENT"
       const idToken = await signedInUser.getIdToken()
       try {
         const res = await fetch(`${API_BASE_URL}/auth/verify`, {
@@ -107,13 +113,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         })
         if (res.ok) {
           const json = await res.json()
-          setRole(json?.data?.role || "PATIENT")
+          authoritativeRole = json?.data?.role || "PATIENT"
+          setRole(authoritativeRole)
+          // Force refresh ID token to get the updated custom claims into the JWT
+          await signedInUser.getIdToken(true).catch(() => {})
+        } else {
+          setRole("PATIENT")
         }
       } catch {
         setRole("PATIENT")
       }
 
-      return signedInUser
+      return { user: signedInUser, role: authoritativeRole }
     } catch (err: any) {
       const errorCode = err?.code
 
@@ -144,7 +155,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           break
       }
 
-      return null
+      return { user: null, role: null }
     } finally {
       setIsSigningIn(false)
     }

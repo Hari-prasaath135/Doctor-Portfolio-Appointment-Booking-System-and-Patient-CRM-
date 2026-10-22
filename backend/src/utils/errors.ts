@@ -27,6 +27,13 @@ export class ValidationError extends AppError {
   }
 }
 
+/** 400 – bad request */
+export class BadRequestError extends AppError {
+  constructor(message = 'Bad Request') {
+    super(message, 400);
+  }
+}
+
 /** 401 – token missing or invalid */
 export class UnauthorizedError extends AppError {
   constructor(message = 'Authentication required') {

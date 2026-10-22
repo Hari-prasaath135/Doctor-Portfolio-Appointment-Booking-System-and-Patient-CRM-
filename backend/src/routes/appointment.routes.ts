@@ -11,6 +11,7 @@ router.use(authenticate);
 router.post('/', appointmentController.createAppointment);
 router.get('/', appointmentController.listAppointments);
 router.get('/:id', appointmentController.getAppointment);
+router.get('/:id/status', appointmentController.getAppointment);
 
 router.put('/:id/confirm', requireDoctorOrAdmin, appointmentController.confirmAppointment);
 router.put('/:id/complete', requireDoctorOrAdmin, appointmentController.completeAppointment);

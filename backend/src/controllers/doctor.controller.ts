@@ -60,6 +60,29 @@ export class DoctorController {
       next(err);
     }
   }
+
+  /**
+   * GET /api/v1/doctors/dashboard
+   * Returns authenticated doctor's operational dashboard data.
+   */
+  async getDashboard(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const user = req.user;
+      if (!user) {
+        res.status(401).json({ success: false, error: 'Authentication required' });
+        return;
+      }
+
+      // Default doctorId to dr-vijay-main or lookup by uid
+      const doctorId = 'dr-vijay-main';
+      const doctorEmail = user.email || 'docifydr@gmail.com';
+
+      const dashboard = await doctorService.getDoctorDashboardData(doctorId, doctorEmail);
+      sendSuccess(res, dashboard, 'Doctor dashboard insights retrieved successfully');
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export const doctorController = new DoctorController();

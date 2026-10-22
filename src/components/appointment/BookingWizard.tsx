@@ -126,7 +126,15 @@ export default function BookingWizard() {
   const [loadingSlots, setLoadingSlots] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isOpeningCheckout, setIsOpeningCheckout] = useState(false)
   const [reservationSuccess, setReservationSuccess] = useState<{ appointmentId: string; fee: number } | null>(null)
+  const [paymentConfirmed, setPaymentConfirmed] = useState<{
+    appointmentId: string
+    paymentId: string
+    fee: number
+  } | null>(null)
+  const [paymentError, setPaymentError] = useState<string | null>(null)
+  const [reconciliationNotice, setReconciliationNotice] = useState<string | null>(null)
 
   // Auto-fill logged-in patient details
   useEffect(() => {
@@ -372,10 +380,135 @@ export default function BookingWizard() {
     setErrors({})
   }
 
+  // Razorpay Checkout Trigger & Verification
+  const launchRazorpayCheckout = async (appointmentId: string, feeInPaise: number) => {
+    setIsOpeningCheckout(true)
+    setPaymentError(null)
+    setReconciliationNotice(null)
+
+    try {
+      if (!currentUser) throw new Error("Please sign in to proceed with payment.")
+      const idToken = await currentUser.getIdToken()
+      if (!idToken) throw new Error("Authentication expired. Please sign in again.")
+
+      // 1. Create Razorpay order via backend
+      const orderRes = await fetch("http://localhost:5000/api/v1/payments/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({
+          appointmentId,
+          idempotencyKey: `idem_${appointmentId}`,
+        }),
+      })
+
+      const orderData = await orderRes.json()
+      if (!orderRes.ok || !orderData.data) {
+        throw new Error(orderData.error || "Failed to create payment order with payment gateway.")
+      }
+
+      const { keyId, orderId, amount, currency } = orderData.data
+
+      // Check if Razorpay script is ready in window
+      if (typeof window === "undefined" || !(window as any).Razorpay) {
+        throw new Error("Razorpay Checkout failed to load. Please refresh and try again.")
+      }
+
+      // 2. Open Razorpay Standard Checkout
+      const options = {
+        key: keyId,
+        amount,
+        currency,
+        name: "Dr. Vijay Clinic",
+        description: `${selectedConfig.title} (Test Mode)`,
+        image: "/dr-vijay-hero.png",
+        order_id: orderId,
+        handler: async (response: {
+          razorpay_payment_id: string
+          razorpay_order_id: string
+          razorpay_signature: string
+        }) => {
+          setIsSubmitting(true)
+          try {
+            // 3. Verify checkout response authoritatively on the backend
+            const verifyToken = await currentUser.getIdToken()
+            const verifyRes = await fetch("http://localhost:5000/api/v1/payments/verify", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${verifyToken}`,
+              },
+              body: JSON.stringify({
+                appointmentId,
+                razorpayOrderId: response.razorpay_order_id,
+                razorpayPaymentId: response.razorpay_payment_id,
+                razorpaySignature: response.razorpay_signature,
+              }),
+            })
+
+            const verifyData = await verifyRes.json()
+            if (!verifyRes.ok) {
+              throw new Error(verifyData.error || "Payment verification failed on the server.")
+            }
+
+            if (verifyData.data?.status === "CONFIRMED") {
+              setPaymentConfirmed({
+                appointmentId,
+                paymentId: response.razorpay_payment_id,
+                fee: feeInPaise,
+              })
+            } else if (verifyData.data?.status === "RECONCILIATION_REQUIRED") {
+              setReconciliationNotice(
+                verifyData.data?.message ||
+                  "Payment received but slot reconciliation is required. Our clinic team has been alerted."
+              )
+            } else {
+              setPaymentError("Payment is currently awaiting confirmation. We will notify you once confirmed.")
+            }
+          } catch (err: any) {
+            setPaymentError(err.message || "Failed to verify payment with clinic server.")
+          } finally {
+            setIsSubmitting(false)
+          }
+        },
+        prefill: {
+          name: booking.fullName,
+          email: booking.email || currentUser.email || "",
+          contact: booking.phone || "",
+        },
+        notes: {
+          appointmentId,
+          environment: "test",
+        },
+        theme: {
+          color: "#0f4c81",
+        },
+        modal: {
+          ondismiss: () => {
+            setIsOpeningCheckout(false)
+          },
+        },
+      }
+
+      const rzp = new (window as any).Razorpay(options)
+      rzp.on("payment.failed", (failResponse: any) => {
+        setPaymentError(failResponse.error?.description || "Payment failed at gateway. Please try again.")
+        setIsOpeningCheckout(false)
+      })
+      rzp.open()
+    } catch (err: any) {
+      setPaymentError(err.message || "Could not initiate payment. Please try again.")
+      setIsOpeningCheckout(false)
+    }
+  }
+
   // Handoff to Checkout (Atomic Slot Reservation via Backend)
   const handleProceedToCheckout = async () => {
     setIsSubmitting(true)
     setErrors({})
+    setPaymentError(null)
 
     try {
       if (!currentUser) {
@@ -429,10 +562,14 @@ export default function BookingWizard() {
         outcome: "success",
       })
 
+      const fee = createdAppointment.feeInPaise || selectedConfig.feeInPaise
       setReservationSuccess({
         appointmentId: createdAppointment.id,
-        fee: createdAppointment.feeInPaise || selectedConfig.feeInPaise,
+        fee,
       })
+
+      // Immediately launch Razorpay checkout modal
+      await launchRazorpayCheckout(createdAppointment.id, fee)
     } catch (err: any) {
       trackEvent({
         eventType: "booking_failed",
@@ -868,9 +1005,8 @@ export default function BookingWizard() {
                   </div>
                 )}
 
-                <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200/60 text-xs text-amber-900 leading-relaxed">
-                  <strong>Notice:</strong> Your appointment slot is held for 15 minutes once you proceed. The booking is
-                  only finalized and confirmed after completing mock payment in the next step.
+                <div className="p-3.5 rounded-xl bg-blue-50/70 border border-blue-200/60 text-xs text-blue-900 leading-relaxed">
+                  <strong>Razorpay Test Mode Notice:</strong> Your appointment slot is reserved for 15 minutes. The booking is finalized and confirmed automatically upon successful verification of Razorpay test payment. No real money will be charged.
                 </div>
 
                 {errors.submit && (
@@ -879,15 +1015,60 @@ export default function BookingWizard() {
                   </div>
                 )}
 
-                {reservationSuccess && (
-                  <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs space-y-1">
-                    <p className="font-bold flex items-center gap-1.5 text-sm">
-                      <CheckCircle className="w-4 h-4" /> Slot Reserved Successfully!
+                {paymentError && (
+                  <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-600 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" /> {paymentError}
+                  </div>
+                )}
+
+                {reconciliationNotice && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" /> {reconciliationNotice}
+                  </div>
+                )}
+
+                {reservationSuccess && !paymentConfirmed && (
+                  <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs space-y-2">
+                    <p className="font-bold flex items-center gap-1.5 text-sm text-amber-800">
+                      <Clock className="w-4 h-4" /> Slot Reserved (Awaiting Payment)
                     </p>
                     <p>
                       Appointment Reference: <code>{reservationSuccess.appointmentId}</code>
                     </p>
-                    <p>Status: PENDING_PAYMENT (Proceed to Phase 3 Mock Gateway to confirm booking)</p>
+                    <p className="text-text-secondary">
+                      Your 15-minute reservation timer is active. Complete payment via Razorpay Checkout to confirm.
+                    </p>
+                    <Button
+                      type="button"
+                      onClick={() => launchRazorpayCheckout(reservationSuccess.appointmentId, reservationSuccess.fee)}
+                      disabled={isOpeningCheckout || isSubmitting}
+                      className="mt-2 bg-medical-blue hover:bg-medical-blue-hover text-white text-xs font-semibold px-4 py-2 rounded-xl"
+                    >
+                      {isOpeningCheckout ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Opening Checkout...
+                        </>
+                      ) : (
+                        "Reopen Razorpay Checkout"
+                      )}
+                    </Button>
+                  </div>
+                )}
+
+                {paymentConfirmed && (
+                  <div className="p-5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 space-y-2">
+                    <p className="font-bold flex items-center gap-2 text-base text-emerald-800">
+                      <CheckCircle className="w-5 h-5 text-emerald-600" /> Appointment Confirmed!
+                    </p>
+                    <p className="text-xs">
+                      Booking Reference: <strong>{paymentConfirmed.appointmentId}</strong>
+                    </p>
+                    <p className="text-xs">
+                      Razorpay Payment ID: <code>{paymentConfirmed.paymentId}</code>
+                    </p>
+                    <p className="text-xs text-emerald-700">
+                      A confirmation email has been dispatched to your email address ({booking.email || currentUser?.email}).
+                    </p>
                   </div>
                 )}
               </motion.div>
@@ -899,7 +1080,7 @@ export default function BookingWizard() {
                 type="button"
                 variant="outline"
                 onClick={handleBack}
-                disabled={currentStep === 1 || isSubmitting}
+                disabled={currentStep === 1 || isSubmitting || isOpeningCheckout || !!paymentConfirmed}
                 className="rounded-xl px-5 text-xs font-semibold"
               >
                 <ArrowLeft className="w-3.5 h-3.5 mr-1.5" /> Back
@@ -917,17 +1098,19 @@ export default function BookingWizard() {
                 <Button
                   type="button"
                   onClick={handleProceedToCheckout}
-                  disabled={isSubmitting || !!reservationSuccess}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-6 text-xs font-bold shadow-md"
+                  disabled={isSubmitting || isOpeningCheckout || !!paymentConfirmed}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-6 text-xs font-bold shadow-md cursor-pointer disabled:opacity-60"
                 >
-                  {isSubmitting ? (
+                  {isSubmitting || isOpeningCheckout ? (
                     <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Reserving Slot...
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Preparing Checkout...
                     </>
+                  ) : paymentConfirmed ? (
+                    "Booking Confirmed"
                   ) : reservationSuccess ? (
-                    "Slot Reserved"
+                    "Complete Razorpay Payment"
                   ) : (
-                    "Proceed to Mock Checkout"
+                    "Reserve Slot & Pay with Razorpay"
                   )}
                 </Button>
               )}

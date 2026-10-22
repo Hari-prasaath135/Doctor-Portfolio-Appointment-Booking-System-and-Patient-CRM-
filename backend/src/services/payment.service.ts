@@ -1,191 +1,490 @@
-import axios from 'axios';
+import crypto from 'crypto';
 import { db, collections, admin } from '../config/firebase';
 import { Payment, PaymentStatus } from '../types';
-import { NotFoundError, ServiceUnavailableError, ConflictError } from '../utils/errors';
+import {
+  NotFoundError,
+  BadRequestError,
+  ForbiddenError,
+  ConflictError,
+  ServiceUnavailableError,
+} from '../utils/errors';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
+import { getRazorpayConfig, getRazorpayClient } from '../config/razorpay';
+import { appointmentService } from './appointment.service';
+import { notificationService } from './notification.service';
 
-// ─── Pinelabs (Plural Pay) Configuration ─────────────────────────────────────
-
-const PINELABS_BASE_URL = process.env.PINELABS_BASE_URL || 'https://pluraluat.v2.pinepg.in';
-const PINELABS_CLIENT_ID = process.env.PINELABS_CLIENT_ID!;
-const PINELABS_CLIENT_SECRET = process.env.PINELABS_CLIENT_SECRET!;
-const PINELABS_MERCHANT_ID = process.env.PINELABS_MERCHANT_ID!;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
-
-interface PinelabsTokenResponse {
-  access_token: string;
-  token_type: string;
-  expires_in: number;
+export interface CreateRazorpayOrderInput {
+  appointmentId: string;
+  patientId: string;
+  idempotencyKey?: string;
 }
 
-/**
- * Payment Service — Pinelabs (Plural Pay) Integration
- *
- * Flow:
- *   1. createPaymentOrder() → Pinelabs API → returns order token + redirect URL
- *   2. Frontend redirects patient to Pinelabs payment page
- *   3. Pinelabs calls our webhook → handleWebhook() → verifies → confirms appointment
- */
+export interface RazorpayOrderResult {
+  paymentRecordId: string;
+  keyId: string;
+  orderId: string;
+  amount: number; // in paise
+  currency: string;
+  appointmentId: string;
+  mode: 'test';
+}
+
+export interface VerifyPaymentInput {
+  appointmentId: string;
+  patientId: string;
+  razorpayOrderId: string;
+  razorpayPaymentId: string;
+  razorpaySignature: string;
+}
+
 export class PaymentService {
   /**
-   * Obtain a short-lived Pinelabs access token.
+   * Step 3: Create a Razorpay Order for an authenticated patient's pending appointment.
+   * - Derives amount authoritatively from appointment.feeInPaise (never trusts client amount)
+   * - Validates appointment ownership & PENDING status
+   * - Validates that slot reservation has not expired
+   * - Reuses eligible existing CREATED/PENDING order if valid (idempotency)
    */
-  private async getPinelabsToken(): Promise<string> {
-    try {
-      const response = await axios.post<PinelabsTokenResponse>(
-        `${PINELABS_BASE_URL}/api/auth/v1/token`,
-        {
-          client_id: PINELABS_CLIENT_ID,
-          client_secret: PINELABS_CLIENT_SECRET,
-          grant_type: 'client_credentials',
+  async createRazorpayOrder(input: CreateRazorpayOrderInput): Promise<RazorpayOrderResult> {
+    const config = getRazorpayConfig();
+    const razorpay = getRazorpayClient();
+
+    // 1. Fetch appointment & enforce patient ownership & eligibility
+    const apptDoc = await db.collection(collections.appointments).doc(input.appointmentId).get();
+    if (!apptDoc.exists) {
+      throw new NotFoundError('Appointment');
+    }
+
+    const appt = apptDoc.data()!;
+    if (appt.patientId !== input.patientId) {
+      throw new ForbiddenError('You can only create payment orders for your own appointments');
+    }
+
+    if (appt.status === 'CONFIRMED') {
+      throw new ConflictError('This appointment is already confirmed');
+    }
+
+    if (appt.status === 'CANCELLED' || appt.status === 'COMPLETED') {
+      throw new BadRequestError(`Cannot pay for an appointment in ${appt.status} status`);
+    }
+
+    // 2. Validate slot reservation is still active
+    const availSnap = await db
+      .collection(collections.availability)
+      .where('doctorId', '==', appt.doctorId)
+      .where('date', '==', appt.date)
+      .limit(1)
+      .get();
+
+    if (!availSnap.empty) {
+      const slots = availSnap.docs[0].data().slots || [];
+      const slot = slots.find((s: any) => s.time === appt.time);
+      if (slot) {
+        if (slot.status === 'BOOKED' && slot.appointmentId !== input.appointmentId) {
+          throw new ConflictError('The reserved slot has expired and was booked by another patient');
         }
-      );
-      return response.data.access_token;
-    } catch (err) {
-      logger.error('Failed to obtain Pinelabs token', err);
-      throw new ServiceUnavailableError('Pinelabs Payment Gateway');
+        if (slot.reservedUntil && new Date(slot.reservedUntil) < new Date()) {
+          throw new ConflictError('Your slot reservation has expired. Please select a new slot.');
+        }
+      }
     }
-  }
 
-  /**
-   * Create a payment order for an appointment.
-   *
-   * @param appointmentId  Appointment to pay for
-   * @param patientId      Patient document ID
-   * @param amountInPaise  Amount in paise (INR × 100)
-   * @param billingInfo    Patient billing details
-   */
-  async createPaymentOrder(
-    appointmentId: string,
-    patientId: string,
-    amountInPaise: number,
-    billingInfo: { name: string; email: string; phone: string }
-  ): Promise<{ paymentId: string; orderId: string; redirectUrl: string; token: string }> {
-    // Check for existing pending payment
-    const existingSnap = await db
+    const authoritativeAmount = appt.feeInPaise;
+    if (!authoritativeAmount || authoritativeAmount <= 0) {
+      throw new BadRequestError('Invalid appointment fee configured');
+    }
+
+    // 3. Idempotency: Check if an active order already exists for this appointment
+    const existingOrderSnap = await db
       .collection(collections.payments)
-      .where('appointmentId', '==', appointmentId)
-      .where('status', '==', 'PENDING')
-      .limit(1)
+      .where('appointmentId', '==', input.appointmentId)
       .get();
 
-    if (!existingSnap.empty) {
-      throw new ConflictError('A pending payment already exists for this appointment');
+    if (!existingOrderSnap.empty) {
+      const activeDoc = existingOrderSnap.docs.find((doc) => {
+        const data = doc.data() as Payment;
+        return (data.status === 'CREATED' || data.status === 'PENDING') && data.amount === authoritativeAmount;
+      });
+
+      if (activeDoc) {
+        const existingPayment = activeDoc.data() as Payment;
+        logger.info(
+          `Reusing existing Razorpay order ${existingPayment.orderId} for appointment ${input.appointmentId}`
+        );
+        return {
+          paymentRecordId: activeDoc.id,
+          keyId: config.keyId,
+          orderId: existingPayment.orderId!,
+          amount: existingPayment.amount,
+          currency: 'INR',
+          appointmentId: input.appointmentId,
+          mode: 'test',
+        };
+      }
     }
 
-    const merchantTransactionId = `TXN_${appointmentId}_${Date.now()}`;
-    const token = await this.getPinelabsToken();
+    // 4. Create Order with Razorpay SDK
+    const receiptId = `rcpt_${input.appointmentId.substring(0, 16)}_${Date.now()}`.substring(0, 40);
+    let rzpOrder: any;
 
-    let pinelabsResponse: { data: { token: string; redirect_url: string } };
     try {
-      pinelabsResponse = await axios.post(
-        `${PINELABS_BASE_URL}/api/v2/order/create`,
-        {
-          merchant_id: PINELABS_MERCHANT_ID,
-          unique_merchant_transaction_id: merchantTransactionId,
-          amount_in_paisa: amountInPaise,
-          currency_code: '356', // INR
-          payment_mode: 1,       // All payment modes
-          billing_name: billingInfo.name,
-          billing_email: billingInfo.email,
-          billing_mobile_number: billingInfo.phone,
-          callback_url: `${FRONTEND_URL}/payment/callback`,
-          txn_completion_datetime: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      rzpOrder = await razorpay.orders.create({
+        amount: authoritativeAmount,
+        currency: 'INR',
+        receipt: receiptId,
+        notes: {
+          appointmentId: input.appointmentId,
+          patientId: input.patientId,
+          serviceName: appt.serviceName || 'Consultation',
+          environment: 'test',
         },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-    } catch (err) {
-      logger.error('Pinelabs order creation failed', err);
-      throw new ServiceUnavailableError('Pinelabs Payment Gateway');
+      });
+    } catch (err: any) {
+      logger.error('Razorpay order creation failed', err);
+      throw new ServiceUnavailableError(`Payment Gateway Error: ${err?.message || 'Order creation failed'}`);
     }
 
-    const { token: orderToken, redirect_url: redirectUrl } = pinelabsResponse.data;
-
-    // Persist payment record
-    const paymentId = uuid();
+    // 5. Persist Payment Record in Firestore
+    const paymentRecordId = uuid();
     const now = admin.firestore.FieldValue.serverTimestamp();
-    const payment: Omit<Payment, 'createdAt' | 'updatedAt'> & { createdAt: unknown; updatedAt: unknown } = {
-      id: paymentId,
-      appointmentId,
-      patientId,
-      amount: amountInPaise,
+
+    const paymentRecord: Payment = {
+      id: paymentRecordId,
+      appointmentId: input.appointmentId,
+      patientId: input.patientId,
+      amount: authoritativeAmount,
       currency: 'INR',
-      status: 'PENDING',
-      provider: 'PINELABS',
-      orderId: merchantTransactionId,
+      status: 'CREATED',
+      provider: 'RAZORPAY',
+      orderId: rzpOrder.id,
+      environment: 'test',
+      ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       webhookReceived: false,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: now as FirebaseFirestore.Timestamp,
+      updatedAt: now as FirebaseFirestore.Timestamp,
     };
 
-    await db.collection(collections.payments).doc(paymentId).set(payment);
+    await db.collection(collections.payments).doc(paymentRecordId).set(paymentRecord);
+    logger.info(`Persisted payment record ${paymentRecordId} for Razorpay order ${rzpOrder.id}`);
 
-    logger.info(`Payment order created: paymentId=${paymentId}, appointmentId=${appointmentId}`);
-    return { paymentId, orderId: merchantTransactionId, redirectUrl, token: orderToken };
+    return {
+      paymentRecordId,
+      keyId: config.keyId,
+      orderId: rzpOrder.id,
+      amount: authoritativeAmount,
+      currency: 'INR',
+      appointmentId: input.appointmentId,
+      mode: 'test',
+    };
   }
 
   /**
-   * Handle Pinelabs payment webhook.
-   * Pinelabs POSTs payment status to our webhook endpoint.
+   * Step 5: Verify Checkout Response
+   * - Enforces PATIENT authorization and appointment ownership
+   * - Validates HMAC SHA-256 signature using key_secret
+   * - Queries Razorpay API independently to confirm captured status & amounts
+   * - Executes atomic appointment confirmation & slot transition via transaction
+   * - Triggers asynchronous notification outbox worker
    */
-  async handleWebhook(payload: Record<string, unknown>): Promise<void> {
-    const {
-      unique_merchant_transaction_id: merchantTxnId,
-      payment_status,
-      plural_transaction_id: providerTxnId,
-      payment_amount_in_paisa,
-    } = payload as {
-      unique_merchant_transaction_id: string;
-      payment_status: string;
-      plural_transaction_id: string;
-      payment_amount_in_paisa: number;
-    };
+  async verifyPayment(input: VerifyPaymentInput): Promise<{
+    status: 'CONFIRMED' | 'PENDING' | 'RECONCILIATION_REQUIRED';
+    appointmentId: string;
+    paymentId: string;
+    message?: string;
+  }> {
+    const config = getRazorpayConfig();
+    const razorpay = getRazorpayClient();
 
-    logger.info(`Pinelabs webhook received — txn=${merchantTxnId}, status=${payment_status}`);
+    // 1. Load appointment & check ownership
+    const apptDoc = await db.collection(collections.appointments).doc(input.appointmentId).get();
+    if (!apptDoc.exists) {
+      throw new NotFoundError('Appointment');
+    }
 
-    // Find payment by orderId (merchant transaction ID)
-    const snap = await db
+    const appt = apptDoc.data()!;
+    if (appt.patientId !== input.patientId) {
+      throw new ForbiddenError('You can only verify payments for your own appointments');
+    }
+
+    // If appointment is already confirmed (e.g. webhook processed it first)
+    if (appt.status === 'CONFIRMED') {
+      return {
+        status: 'CONFIRMED',
+        appointmentId: input.appointmentId,
+        paymentId: input.razorpayPaymentId,
+        message: 'Appointment is already confirmed',
+      };
+    }
+
+    // 2. Load payment record
+    const paymentSnap = await db
       .collection(collections.payments)
-      .where('orderId', '==', merchantTxnId)
+      .where('orderId', '==', input.razorpayOrderId)
+      .where('appointmentId', '==', input.appointmentId)
       .limit(1)
       .get();
 
-    if (snap.empty) {
-      logger.warn(`Webhook received for unknown order: ${merchantTxnId}`);
-      return;
+    if (paymentSnap.empty) {
+      throw new NotFoundError('Payment order record');
     }
 
-    const paymentDoc = snap.docs[0];
+    const paymentDoc = paymentSnap.docs[0];
     const paymentData = paymentDoc.data() as Payment;
 
-    // Idempotency check
-    if (paymentData.webhookReceived) {
-      logger.info(`Duplicate webhook for ${merchantTxnId}, ignoring`);
-      return;
+    // 3. Verify Signature: HMAC SHA256(order_id + "|" + razorpay_payment_id, key_secret)
+    const payload = `${input.razorpayOrderId}|${input.razorpayPaymentId}`;
+    const expectedSignature = crypto
+      .createHmac('sha256', config.keySecret)
+      .update(payload)
+      .digest('hex');
+
+    if (expectedSignature !== input.razorpaySignature) {
+      logger.warn(`Signature mismatch for order ${input.razorpayOrderId}`);
+      await paymentDoc.ref.update({
+        status: 'FAILED',
+        errorMetadata: { reason: 'Signature verification failed' },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      throw new BadRequestError('Invalid payment signature');
     }
 
-    const isSuccess =
-      payment_status?.toUpperCase() === 'PAYMENT_SUCCESS' ||
-      payment_status?.toUpperCase() === 'SUCCESS' ||
-      payment_status?.toUpperCase() === 'CAPTURED';
+    // 4. Independently query Razorpay server-side API to verify captured status
+    let rzpPayment: any;
+    try {
+      rzpPayment = await razorpay.payments.fetch(input.razorpayPaymentId);
+    } catch (err: any) {
+      logger.error(`Failed to fetch payment ${input.razorpayPaymentId} from Razorpay`, err);
+      throw new ServiceUnavailableError('Unable to verify payment status with payment gateway');
+    }
 
-    const newStatus: PaymentStatus = isSuccess ? 'PAID' : 'FAILED';
+    if (!rzpPayment || rzpPayment.order_id !== input.razorpayOrderId) {
+      throw new BadRequestError('Payment does not match the expected Razorpay order');
+    }
 
+    if (rzpPayment.amount !== paymentData.amount || rzpPayment.currency !== 'INR') {
+      throw new BadRequestError('Payment amount or currency mismatch with authoritative order');
+    }
+
+    // If authorized but not captured
+    if (rzpPayment.status === 'authorized') {
+      await paymentDoc.ref.update({
+        status: 'AUTHORIZED',
+        paymentId: input.razorpayPaymentId,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return {
+        status: 'PENDING',
+        appointmentId: input.appointmentId,
+        paymentId: input.razorpayPaymentId,
+        message: 'Payment authorized but awaiting capture',
+      };
+    }
+
+    if (rzpPayment.status !== 'captured') {
+      await paymentDoc.ref.update({
+        status: 'FAILED',
+        paymentId: input.razorpayPaymentId,
+        errorMetadata: { razorpayStatus: rzpPayment.status },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      throw new BadRequestError(`Payment is not in captured status (Current status: ${rzpPayment.status})`);
+    }
+
+    // 5. Update payment record to CAPTURED
+    const now = admin.firestore.FieldValue.serverTimestamp();
     await paymentDoc.ref.update({
-      status: newStatus,
-      transactionId: providerTxnId,
-      amount: payment_amount_in_paisa || paymentData.amount,
-      webhookReceived: true,
-      paidAt: isSuccess ? admin.firestore.FieldValue.serverTimestamp() : null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      status: 'CAPTURED',
+      paymentId: input.razorpayPaymentId,
+      signature: input.razorpaySignature,
+      paymentMethod: rzpPayment.method,
+      capturedAt: now,
+      paidAt: now,
+      updatedAt: now,
     });
 
-    logger.info(`Payment ${paymentDoc.id} status updated to ${newStatus}`);
+    // 6. Atomic appointment confirmation & slot transition
+    const confirmResult = await appointmentService.confirmAppointmentWithPayment(
+      input.appointmentId,
+      paymentDoc.id,
+      paymentData.amount,
+      'INR'
+    );
+
+    if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
+      logger.error(
+        `CRITICAL: Payment captured for appointment ${input.appointmentId} but confirmation failed: ${confirmResult.reason}`
+      );
+      await paymentDoc.ref.update({
+        status: 'RECONCILIATION_REQUIRED',
+        errorMetadata: { reason: confirmResult.reason },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return {
+        status: 'RECONCILIATION_REQUIRED',
+        appointmentId: input.appointmentId,
+        paymentId: input.razorpayPaymentId,
+        message: confirmResult.reason,
+      };
+    }
+
+    // 7. Trigger outbox queue asynchronously for email notification
+    notificationService.processOutboxQueue().catch((err) => {
+      logger.error('Error processing notification outbox queue', err);
+    });
+
+    return {
+      status: 'CONFIRMED',
+      appointmentId: input.appointmentId,
+      paymentId: input.razorpayPaymentId,
+    };
   }
 
   /**
-   * Get payment by ID.
+   * Step 6: Process Razorpay Webhook
+   * - Verifies X-Razorpay-Signature using raw body
+   * - Deduplicates eventId via webhookEvents collection
+   * - Handles payment.captured, payment.failed, order.paid
+   * - Executes atomic confirmation without depending on client browser
+   */
+  async handleRazorpayWebhook(
+    rawBody: Buffer,
+    signature: string,
+    eventPayload: any
+  ): Promise<{ status: string }> {
+    const config = getRazorpayConfig();
+
+    if (!config.webhookSecret) {
+      logger.warn('RAZORPAY_WEBHOOK_SECRET is not configured. Webhook processing rejected.');
+      throw new BadRequestError('Webhook secret not configured');
+    }
+
+    // 1. Verify HMAC SHA-256 signature
+    const expectedSignature = crypto
+      .createHmac('sha256', config.webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+
+    if (expectedSignature !== signature) {
+      logger.warn('Razorpay webhook signature verification failed');
+      throw new BadRequestError('Invalid webhook signature');
+    }
+
+    const eventId = eventPayload?.event_id || eventPayload?.id;
+    const eventType = eventPayload?.event;
+
+    if (!eventId) {
+      throw new BadRequestError('Missing webhook event ID');
+    }
+
+    // 2. Durable Deduplication: check webhookEvents collection
+    const eventRef = db.collection(collections.webhookEvents).doc(eventId);
+    const eventSnap = await eventRef.get();
+    if (eventSnap.exists) {
+      logger.info(`Webhook event ${eventId} already processed. Skipping.`);
+      return { status: 'DUPLICATE_IGNORED' };
+    }
+
+    await eventRef.set({
+      id: eventId,
+      event: eventType,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    logger.info(`Processing Razorpay webhook event: ${eventType} (ID: ${eventId})`);
+
+    // 3. Handle Events
+    if (eventType === 'payment.captured') {
+      const paymentEntity = eventPayload?.payload?.payment?.entity;
+      const orderId = paymentEntity?.order_id;
+      const paymentId = paymentEntity?.id;
+      const amount = paymentEntity?.amount;
+
+      if (!orderId) {
+        logger.warn('Webhook payment.captured missing order_id');
+        return { status: 'SKIPPED_NO_ORDER_ID' };
+      }
+
+      const paymentSnap = await db
+        .collection(collections.payments)
+        .where('orderId', '==', orderId)
+        .limit(1)
+        .get();
+
+      if (!paymentSnap.empty) {
+        const paymentDoc = paymentSnap.docs[0];
+        const pData = paymentDoc.data() as Payment;
+
+        const now = admin.firestore.FieldValue.serverTimestamp();
+        await paymentDoc.ref.update({
+          status: 'CAPTURED',
+          paymentId,
+          webhookReceived: true,
+          capturedAt: now,
+          paidAt: now,
+          updatedAt: now,
+        });
+
+        // Trigger atomic confirmation
+        const confirmResult = await appointmentService.confirmAppointmentWithPayment(
+          pData.appointmentId,
+          paymentDoc.id,
+          amount || pData.amount,
+          'INR'
+        );
+
+        if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
+          logger.error(
+            `Webhook confirmation reconciliation required for appointment ${pData.appointmentId}: ${confirmResult.reason}`
+          );
+          await paymentDoc.ref.update({
+            status: 'RECONCILIATION_REQUIRED',
+            errorMetadata: { reason: confirmResult.reason },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        }
+
+        // Trigger notification queue
+        notificationService.processOutboxQueue().catch(() => {});
+      }
+    } else if (eventType === 'payment.failed') {
+      const paymentEntity = eventPayload?.payload?.payment?.entity;
+      const orderId = paymentEntity?.order_id;
+      const paymentId = paymentEntity?.id;
+
+      if (orderId) {
+        const paymentSnap = await db
+          .collection(collections.payments)
+          .where('orderId', '==', orderId)
+          .limit(1)
+          .get();
+
+        if (!paymentSnap.empty) {
+          const paymentDoc = paymentSnap.docs[0];
+          const currentStatus = paymentDoc.data().status;
+
+          // Never let a failure event overwrite an already confirmed/captured payment
+          if (currentStatus !== 'CAPTURED' && currentStatus !== 'PAID') {
+            await paymentDoc.ref.update({
+              status: 'FAILED',
+              paymentId,
+              webhookReceived: true,
+              errorMetadata: {
+                errorCode: paymentEntity?.error_code,
+                errorDescription: paymentEntity?.error_description,
+              },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+    }
+
+    return { status: 'PROCESSED' };
+  }
+
+  /**
+   * Get payment by ID with ownership checks.
    */
   async getPaymentById(id: string): Promise<Payment> {
     const snap = await db.collection(collections.payments).doc(id).get();
@@ -207,24 +506,6 @@ export class PaymentService {
     if (snap.empty) return null;
     const doc = snap.docs[0];
     return { id: doc.id, ...doc.data() } as unknown as Payment;
-  }
-
-  /**
-   * Mark payment as paid (for manual admin overrides or testing).
-   */
-  async markAsPaid(paymentId: string, transactionId: string): Promise<Payment> {
-    const ref = db.collection(collections.payments).doc(paymentId);
-    if (!(await ref.get()).exists) throw new NotFoundError('Payment');
-
-    await ref.update({
-      status: 'PAID' as PaymentStatus,
-      transactionId,
-      paidAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    const updated = await ref.get();
-    return { id: updated.id, ...updated.data() } as unknown as Payment;
   }
 }
 

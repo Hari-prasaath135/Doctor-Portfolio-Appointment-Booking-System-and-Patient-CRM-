@@ -56,3 +56,7 @@ yarn-error.log*
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Binaries
+*.exe
+cloudflared.exe

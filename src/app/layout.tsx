@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { Plus_Jakarta_Sans, Inter } from "next/font/google"
 import "./globals.css"
 import "mapbox-gl/dist/mapbox-gl.css"
+import Script from "next/script"
 import SiteChrome from "@/components/layout/SiteChrome"
 import SmoothScroll from "@/components/layout/SmoothScroll"
 import Providers from "@/components/Providers"
@@ -62,6 +63,7 @@ export default function RootLayout({
             </SmoothScroll>
           </Providers>
         </SplashScreen>
+        <Script src="https://checkout.razorpay.com/v1/checkout.js" strategy="lazyOnload" />
       </body>
     </html>
   )

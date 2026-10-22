@@ -22,6 +22,7 @@ import analyticsRoutes from './routes/analytics.routes';
 
 import { AppError } from './utils/errors';
 import { logger } from './utils/logger';
+import { paymentController } from './controllers/payment.controller';
 
 const app = express();
 
@@ -29,8 +30,14 @@ const app = express();
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
 
-// Pinelabs webhook needs raw body or JSON depending on their format, we'll parse JSON generally
-app.use(express.json());
+// Parse JSON with rawBody buffer capture for webhook HMAC signature verification
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
@@ -46,6 +53,9 @@ app.use('/api/v1/doctors', doctorRoutes);
 app.use('/api/v1/appointments', appointmentRoutes);
 app.use('/api/v1/availability', availabilityRoutes);
 app.use('/api/v1/payments', paymentRoutes);
+app.post('/api/v1/webhooks/razorpay', (req, res, next) => {
+  paymentController.handleRazorpayWebhook(req, res, next);
+});
 app.use('/api/v1/refunds', refundRoutes);
 app.use('/api/v1/video', videoRoutes);
 app.use('/api/v1/consultations', consultationRoutes);

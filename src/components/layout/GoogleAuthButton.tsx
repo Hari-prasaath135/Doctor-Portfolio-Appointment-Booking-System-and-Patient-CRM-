@@ -33,14 +33,15 @@ export default function GoogleAuthButton({ onLoginSuccess }: { onLoginSuccess?: 
   const router = useRouter()
 
   const handleSignIn = async () => {
-    const signedInUser = await signInWithGoogle()
+    const { user: signedInUser, role: signedInRole } = await signInWithGoogle()
     if (signedInUser) {
       if (onLoginSuccess) {
         onLoginSuccess()
       } else {
-        if (role === "DOCTOR") {
+        const targetRole = signedInRole || role
+        if (targetRole === "DOCTOR") {
           router.push("/doctor-dashboard")
-        } else if (role === "ADMIN") {
+        } else if (targetRole === "ADMIN") {
           router.push("/admin-dashboard")
         }
       }

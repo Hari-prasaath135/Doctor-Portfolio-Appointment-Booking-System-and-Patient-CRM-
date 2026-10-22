@@ -41,13 +41,27 @@ export async function authenticate(
     const userObj = decodedToken as NonNullable<AuthenticatedRequest['user']>;
     if (!userObj['role']) {
       // In case custom claims are not yet set or propagated on the token,
-      // fallback to user's profile role from database
+      // fallback authoritatively using server-configured roles or database profile.
       try {
-        const userDoc = await db.collection('users').doc(decodedToken.uid).get();
-        if (userDoc.exists) {
-          userObj['role'] = userDoc.data()?.role || 'PATIENT';
-        } else {
-          userObj['role'] = 'PATIENT';
+        const normalizedEmail = (decodedToken.email || '').trim().toLowerCase();
+        const configuredAdminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+        const configuredDoctorEmail = (process.env.DOCTOR_EMAIL || '').trim().toLowerCase();
+
+        if (decodedToken.email_verified !== false && normalizedEmail) {
+          if (configuredAdminEmail && normalizedEmail === configuredAdminEmail) {
+            userObj['role'] = 'ADMIN';
+          } else if (configuredDoctorEmail && normalizedEmail === configuredDoctorEmail) {
+            userObj['role'] = 'DOCTOR';
+          }
+        }
+
+        if (!userObj['role']) {
+          const userDoc = await db.collection('users').doc(decodedToken.uid).get();
+          if (userDoc.exists) {
+            userObj['role'] = userDoc.data()?.role || 'PATIENT';
+          } else {
+            userObj['role'] = 'PATIENT';
+          }
         }
       } catch {
         userObj['role'] = 'PATIENT';

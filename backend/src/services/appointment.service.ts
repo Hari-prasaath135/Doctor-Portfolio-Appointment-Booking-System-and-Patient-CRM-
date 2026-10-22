@@ -352,6 +352,205 @@ export class AppointmentService {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   }
+
+  /**
+   * Atomic appointment confirmation and slot booking after verified payment capture.
+   * Runs in a Firestore transaction:
+   * 1. Validates appointment and slot state
+   * 2. Checks reservation validity and ownership
+   * 3. Transitions appointment to CONFIRMED
+   * 4. Transitions slot to BOOKED (isBooked=true, status='BOOKED')
+   * 5. Enqueues a notification outbox record for asynchronous email processing
+   * 6. Commits atomically
+   */
+  async confirmAppointmentWithPayment(
+    appointmentId: string,
+    paymentRecordId: string,
+    verifiedAmount: number,
+    verifiedCurrency: string
+  ): Promise<{ status: 'CONFIRMED' | 'ALREADY_CONFIRMED' | 'RECONCILIATION_REQUIRED'; reason?: string; appointment?: Appointment }> {
+    const appointmentRef = db.collection(collections.appointments).doc(appointmentId);
+    let outcome: { status: 'CONFIRMED' | 'ALREADY_CONFIRMED' | 'RECONCILIATION_REQUIRED'; reason?: string; appointment?: Appointment } = {
+      status: 'RECONCILIATION_REQUIRED',
+    };
+
+    await db.runTransaction(async (tx) => {
+      const apptDoc = await tx.get(appointmentRef);
+      if (!apptDoc.exists) {
+        outcome = { status: 'RECONCILIATION_REQUIRED', reason: 'Appointment does not exist' };
+        return;
+      }
+
+      const apptData = apptDoc.data() as Appointment;
+
+      // Idempotency: If already confirmed, safely return without conflicting changes
+      if (apptData.status === 'CONFIRMED') {
+        outcome = { status: 'ALREADY_CONFIRMED', appointment: apptData };
+        return;
+      }
+
+      // If appointment was already cancelled or completed
+      if (apptData.status === 'CANCELLED' || apptData.status === 'COMPLETED') {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Appointment is in terminal state ${apptData.status}`,
+        };
+        return;
+      }
+
+      // Check payment amount and currency match
+      if (apptData.feeInPaise !== verifiedAmount || verifiedCurrency !== 'INR') {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Amount/currency mismatch. Expected ${apptData.feeInPaise} INR, got ${verifiedAmount} ${verifiedCurrency}`,
+        };
+        return;
+      }
+
+      // Find availability document
+      const availQuery = db
+        .collection(collections.availability)
+        .where('doctorId', '==', apptData.doctorId)
+        .where('date', '==', apptData.date)
+        .limit(1);
+
+      const availSnap = await tx.get(availQuery);
+      if (availSnap.empty) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Availability document not found for doctor ${apptData.doctorId} on ${apptData.date}`,
+        };
+        return;
+      }
+
+      const availDoc = availSnap.docs[0];
+      const availRef = availDoc.ref;
+      const slots = availDoc.data().slots || [];
+
+      const slotIndex = slots.findIndex((s: any) => s.time === apptData.time);
+      if (slotIndex === -1) {
+        outcome = { status: 'RECONCILIATION_REQUIRED', reason: `Slot ${apptData.time} not found` };
+        return;
+      }
+
+      const slot = slots[slotIndex];
+
+      // Validate slot reservation
+      // If already booked by someone else or another appointment
+      if (slot.status === 'BOOKED' && slot.appointmentId && slot.appointmentId !== appointmentId) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Slot was reassigned or booked by another appointment (${slot.appointmentId})`,
+        };
+        return;
+      }
+
+      // Update slot to BOOKED
+      slots[slotIndex].isBooked = true;
+      slots[slotIndex].status = 'BOOKED';
+      slots[slotIndex].appointmentId = appointmentId;
+      slots[slotIndex].reservedBy = apptData.patientId;
+      delete slots[slotIndex].reservedUntil;
+
+      tx.update(availRef, {
+        slots,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Update appointment
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      tx.update(appointmentRef, {
+        status: 'CONFIRMED',
+        paymentId: paymentRecordId,
+        confirmedAt: now,
+        updatedAt: now,
+      });
+
+      // Enqueue notification outbox record durably
+      const outboxRef = db.collection(collections.notificationOutbox).doc();
+      tx.set(outboxRef, {
+        id: outboxRef.id,
+        appointmentId,
+        patientId: apptData.patientId,
+        recipientEmail: apptData.email,
+        patientName: apptData.patientName,
+        appointmentDate: apptData.date,
+        appointmentTime: apptData.time,
+        serviceName: apptData.serviceName,
+        amount: verifiedAmount,
+        status: 'PENDING',
+        attempts: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      outcome = {
+        status: 'CONFIRMED',
+        appointment: { ...apptData, status: 'CONFIRMED', paymentId: paymentRecordId },
+      };
+    });
+
+    return outcome;
+  }
+
+  /**
+   * Clean up expired reservations whose reservation duration (15 mins) has elapsed
+   * without a confirmed payment. Idempotent and concurrency-safe.
+   */
+  async releaseExpiredReservations(): Promise<{ releasedCount: number }> {
+    const nowIso = new Date().toISOString();
+    let releasedCount = 0;
+
+    // Find availability docs that have slots
+    const availSnap = await db.collection(collections.availability).get();
+
+    for (const availDoc of availSnap.docs) {
+      const data = availDoc.data();
+      const slots = data.slots || [];
+      let updated = false;
+
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i];
+        if (
+          slot.status === 'RESERVED' &&
+          slot.reservedUntil &&
+          slot.reservedUntil < nowIso
+        ) {
+          // Check associated appointment
+          if (slot.appointmentId) {
+            const apptSnap = await db.collection(collections.appointments).doc(slot.appointmentId).get();
+            if (apptSnap.exists) {
+              const appt = apptSnap.data();
+              if (appt?.status === 'PENDING') {
+                await apptSnap.ref.update({
+                  status: 'CANCELLED',
+                  cancelReason: 'Reservation expired before payment completion',
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+                });
+              }
+            }
+          }
+
+          slots[i].isBooked = false;
+          slots[i].status = 'AVAILABLE';
+          delete slots[i].reservedUntil;
+          delete slots[i].reservedBy;
+          delete slots[i].appointmentId;
+          updated = true;
+          releasedCount++;
+        }
+      }
+
+      if (updated) {
+        await availDoc.ref.update({
+          slots,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    }
+
+    return { releasedCount };
+  }
 }
 
 export const appointmentService = new AppointmentService();

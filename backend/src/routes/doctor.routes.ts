@@ -7,6 +7,10 @@ const router = Router();
 
 // Publicly viewable list of doctors
 router.get('/', doctorController.listDoctors);
+
+// Doctor Dashboard — operational insights for authenticated doctor or admin
+router.get('/dashboard', authenticate, requireDoctorOrAdmin, doctorController.getDashboard);
+
 router.get('/:id', doctorController.getDoctor);
 
 // Admin / Doctor protected routes

@@ -194,8 +194,20 @@ export interface RescheduleAppointmentInput {
 
 // ─── Payment ─────────────────────────────────────────────────────────────────
 
-export type PaymentStatus = 'PENDING' | 'PAID' | 'FAILED' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
-export type PaymentProvider = 'PINELABS';
+export type PaymentStatus =
+  | 'CREATED'
+  | 'PENDING'
+  | 'PAID'
+  | 'AUTHORIZED'
+  | 'CAPTURED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | 'RECONCILIATION_REQUIRED'
+  | 'REFUNDED'
+  | 'PARTIALLY_REFUNDED';
+
+export type PaymentProvider = 'RAZORPAY' | 'PINELABS';
 
 export interface Payment {
   id: string;
@@ -205,10 +217,16 @@ export interface Payment {
   currency: string;        // 'INR'
   status: PaymentStatus;
   provider: PaymentProvider;
-  orderId?: string;        // provider order ID
+  orderId?: string;        // Razorpay order ID (e.g. order_xxx)
+  paymentId?: string;      // Razorpay payment ID (e.g. pay_xxx)
   transactionId?: string;  // provider transaction ID
+  signature?: string;      // payment signature
   paymentMethod?: string;
   webhookReceived?: boolean;
+  environment?: 'test' | 'live';
+  idempotencyKey?: string;
+  errorMetadata?: Record<string, unknown>;
+  capturedAt?: FirebaseFirestore.Timestamp;
   paidAt?: FirebaseFirestore.Timestamp;
   createdAt: FirebaseFirestore.Timestamp;
   updatedAt: FirebaseFirestore.Timestamp;
@@ -501,3 +519,68 @@ export interface AdminStats {
   totalRefunds: number;         // in paise
   recentAppointments: Appointment[];
 }
+
+// ─── Doctor Dashboard ─────────────────────────────────────────────────────────
+
+export interface DoctorDashboardAppointment {
+  id: string;
+  patientId: string;
+  patientName: string;
+  email?: string;
+  phone?: string;
+  dateOfBirth?: string;
+  age?: number;
+  date: string;
+  time: string;
+  status: AppointmentStatus;
+  serviceName: string;
+  consultationType?: ConsultationType;
+  message?: string;
+  medicalHistory?: string;
+  attachments?: MedicalAttachmentMetadata[];
+  consultationId?: string;
+  consultationNotes?: string;
+}
+
+export interface DoctorSlotItem {
+  id: string;
+  startTime: string;
+  endTime: string;
+  date: string;
+  isBooked: boolean;
+  status: 'available' | 'booked';
+}
+
+export interface DoctorDashboardData {
+  doctor: {
+    id: string;
+    name: string;
+    specialization: string;
+    email: string;
+  };
+  metrics: {
+    todayCount: number;
+    upcomingCount: number;
+    completedCount: number;
+    pendingCount: number;
+    cancelledCount: number;
+    totalAppointments: number;
+    availableSlotsToday: number;
+    totalSlotsToday: number;
+    slotUtilizationRate: number; // percentage
+  };
+  todayAppointments: DoctorDashboardAppointment[];
+  upcomingAppointments: DoctorDashboardAppointment[];
+  pastAppointments: DoctorDashboardAppointment[];
+  slotsByDay: Record<string, DoctorSlotItem[]>;
+  availableDays: string[];
+  recentActivity: {
+    id: string;
+    type: string;
+    message: string;
+    timeAgo: string;
+    timestamp: string;
+  }[];
+  lastUpdated: string;
+}
+

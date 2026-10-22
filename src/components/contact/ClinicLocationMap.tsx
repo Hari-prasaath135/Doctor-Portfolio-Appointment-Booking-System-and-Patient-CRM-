@@ -50,6 +50,9 @@
       mapboxgl.accessToken = MAPBOX_TOKEN
 
       let cancelled = false
+      let mapInstance: mapboxgl.Map | null = null
+      let markerInstance: mapboxgl.Marker | null = null
+      let resizeRafId: number | null = null
 
       async function initMap() {
         try {
@@ -69,23 +72,25 @@
 
           if (cancelled || !mapContainer.current) return
 
+          // Ensure container is present in the DOM and has layout dimensions
+          const container = mapContainer.current
+          const rect = container.getBoundingClientRect()
+          if (rect.width === 0 && rect.height === 0) {
+            // Wait for next frame when layout is calculated
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+            if (cancelled || !mapContainer.current) return
+          }
+
           const map = new mapboxgl.Map({
             container: mapContainer.current,
             style: "mapbox://styles/mapbox/streets-v12",
             center: coords,
             zoom: 15,
           })
+          mapInstance = map
           mapRef.current = map
 
           map.addControl(new mapboxgl.NavigationControl(), "top-right")
-
-          // Mapbox GL needs a measured, non-zero container size at init time.
-          // If this component mounts inside a flex/grid parent whose height
-          // isn't settled yet, the map can initialize at 0px and render blank.
-          // Forcing a resize on the next tick (and once more after "load")
-          // fixes that without needing to touch the parent's CSS.
-          requestAnimationFrame(() => map.resize())
-          map.once("load", () => map.resize())
 
           const popupHtml = `
             <div style="font-family: inherit; padding: 4px 2px;">
@@ -94,12 +99,30 @@
             </div>
           `
 
-          new mapboxgl.Marker({ color: "#D6336C" })
+          const popup = new mapboxgl.Popup({ offset: 24 }).setHTML(popupHtml)
+          const marker = new mapboxgl.Marker({ color: "#D6336C" })
             .setLngLat(coords)
-            .setPopup(new mapboxgl.Popup({ offset: 24 }).setHTML(popupHtml))
+            .setPopup(popup)
             .addTo(map)
+          markerInstance = marker
 
-          setStatus("ready")
+          // Listen for map errors gracefully
+          map.on("error", (e) => {
+            if (!cancelled) {
+              console.warn("Mapbox GL runtime notice:", e?.error?.message || e)
+            }
+          })
+
+          // Resize only after the map is fully loaded and rendering resources ready
+          map.once("load", () => {
+            if (cancelled || !mapRef.current) return
+            resizeRafId = requestAnimationFrame(() => {
+              if (!cancelled && mapRef.current) {
+                mapRef.current.resize()
+                setStatus("ready")
+              }
+            })
+          })
         } catch (err) {
           if (cancelled) return
           setStatus("error")
@@ -111,7 +134,17 @@
 
       return () => {
         cancelled = true
-        mapRef.current?.remove()
+        if (resizeRafId !== null) {
+          cancelAnimationFrame(resizeRafId)
+        }
+        if (markerInstance) {
+          markerInstance.remove()
+          markerInstance = null
+        }
+        if (mapInstance) {
+          mapInstance.remove()
+          mapInstance = null
+        }
         mapRef.current = null
       }
     }, [])

@@ -77,4 +77,6 @@ export const collections = {
   meetingDetails: 'meetingDetails',
   analytics: 'analytics',
   enquiries: 'enquiries',
+  webhookEvents: 'webhookEvents',
+  notificationOutbox: 'notificationOutbox',
 } as const;

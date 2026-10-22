@@ -82,7 +82,11 @@ async function runSecurityRBACTests() {
   const testApp: Express = express();
   testApp.use(express.json());
 
+  testApp.post('/api/v1/auth/verify', authenticate, (req: any, res: any) => {
+    res.json({ success: true, data: { role: req.user?.role || 'PATIENT' } });
+  });
   testApp.get('/api/v1/admin/stats', authenticate, requireAdmin, adminController.getDashboardStats);
+  testApp.get('/api/v1/doctors/dashboard', authenticate, requireDoctorOrAdmin, doctorController.getDashboard);
   testApp.post('/api/v1/doctors', authenticate, requireAdmin, doctorController.createDoctor);
   testApp.get('/api/v1/appointments', authenticate, appointmentController.listAppointments);
   testApp.get('/api/v1/appointments/:id', authenticate, appointmentController.getAppointment);
@@ -166,6 +170,57 @@ async function runSecurityRBACTests() {
         Authorization: 'Bearer valid-admin-token',
       });
       assert(res.status === 200, 'Admin token accessing /api/v1/admin/stats returns 200 OK', `Status: ${res.status}`);
+    }
+
+    // 4d. Unrefreshed Admin token (missing custom claim `role`) authoritatively resolves to ADMIN via server config
+    {
+      (auth as any).verifyIdToken = async (token: string) => {
+        if (token === 'admin-unrefreshed-token') {
+          return { uid: 'admin-uid-001', email: 'hariclaudepix@gmail.com', email_verified: true };
+        }
+        throw new Error('Invalid token');
+      };
+
+      const verifyRes = await makeRequest(server, 'POST', '/api/v1/auth/verify', {
+        Authorization: 'Bearer admin-unrefreshed-token',
+      });
+      assert(verifyRes.status === 200, '/api/v1/auth/verify returns 200 OK for admin account');
+      assert(verifyRes.body?.data?.role === 'ADMIN', 'Unrefreshed token for hariclaudepix@gmail.com resolves to ADMIN');
+
+      const statsRes = await makeRequest(server, 'GET', '/api/v1/admin/stats', {
+        Authorization: 'Bearer admin-unrefreshed-token',
+      });
+      assert(statsRes.status === 200, 'Admin access with unrefreshed token passes middleware authoritatively (200 OK)');
+    }
+
+    // 4e. Patient token attempting Doctor Dashboard -> 403 Forbidden
+    {
+      (auth as any).verifyIdToken = async (token: string) => {
+        if (token === 'valid-patient-token') {
+          return { uid: 'patient-uid-001', email: 'patient@example.com', role: 'PATIENT' };
+        }
+        throw new Error('Invalid token');
+      };
+
+      const res = await makeRequest(server, 'GET', '/api/v1/doctors/dashboard', {
+        Authorization: 'Bearer valid-patient-token',
+      });
+      assert(res.status === 403, 'Patient token accessing /api/v1/doctors/dashboard returns 403 Forbidden', `Status: ${res.status}`);
+    }
+
+    // 4f. Doctor token accessing Doctor Dashboard -> 200 OK
+    {
+      (auth as any).verifyIdToken = async (token: string) => {
+        if (token === 'valid-doctor-token') {
+          return { uid: 'doctor-uid-001', email: 'docifydr@gmail.com', role: 'DOCTOR' };
+        }
+        throw new Error('Invalid token');
+      };
+
+      const res = await makeRequest(server, 'GET', '/api/v1/doctors/dashboard', {
+        Authorization: 'Bearer valid-doctor-token',
+      });
+      assert(res.status === 200, 'Doctor token accessing /api/v1/doctors/dashboard returns 200 OK', `Status: ${res.status}`);
     }
 
     // 5. Patient attempting doctor-creation -> 403 Forbidden
