@@ -487,12 +487,37 @@ export class AppointmentService {
 
       const slot = slots[slotIndex];
 
-      // Validate slot reservation
-      // If already booked by someone else or another appointment
-      if (slot.status === 'BOOKED' && slot.appointmentId && slot.appointmentId !== appointmentId) {
+      // Validate that the slot is still reserved for this exact appointment.
+      // A different reservation (not just a completed booking) must never be
+      // overwritten by a late payment callback.
+      if (slot.status === 'BLOCKED') {
         outcome = {
           status: 'RECONCILIATION_REQUIRED',
-          reason: `Slot was reassigned or booked by another appointment (${slot.appointmentId})`,
+          reason: 'The appointment slot has been blocked',
+        };
+        return;
+      }
+
+      if (
+        slot.appointmentId &&
+        slot.appointmentId !== appointmentId &&
+        (slot.isBooked || slot.status === 'BOOKED' || slot.status === 'RESERVED')
+      ) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Slot was reassigned to another appointment (${slot.appointmentId})`,
+        };
+        return;
+      }
+
+      if (
+        slot.status === 'RESERVED' &&
+        slot.reservedUntil &&
+        new Date(slot.reservedUntil) <= new Date()
+      ) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: 'The slot reservation expired before payment confirmation',
         };
         return;
       }
@@ -573,7 +598,7 @@ export class AppointmentService {
             const apptSnap = await db.collection(collections.appointments).doc(slot.appointmentId).get();
             if (apptSnap.exists) {
               const appt = apptSnap.data();
-              if (appt?.status === 'PENDING') {
+              if (appt && ['PENDING', 'RESCHEDULED'].includes(appt.status) && !appt.paymentId) {
                 await apptSnap.ref.update({
                   status: 'CANCELLED',
                   cancelReason: 'Reservation expired before payment completion',
