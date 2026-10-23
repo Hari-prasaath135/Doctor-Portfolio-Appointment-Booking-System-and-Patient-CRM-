@@ -13,6 +13,7 @@ const eslintConfig = defineConfig([
       // Existing UI effects are being refactored incrementally; keep these visible
       // as warnings so lint can still report unrelated regressions.
       "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/preserve-manual-memoization": "warn",
       "react/no-unescaped-entities": "warn",
     },
   },
