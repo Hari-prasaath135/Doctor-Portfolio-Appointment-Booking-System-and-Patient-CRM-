@@ -86,15 +86,49 @@ export class AppointmentService {
       }
 
       const slot = slots[slotIndex];
-      const isReservedAndActive = slot.status === 'RESERVED' && slot.reservedUntil && new Date(slot.reservedUntil) > new Date();
+      const now = new Date();
+      const reservationExpired =
+        slot.status === 'RESERVED' &&
+        Boolean(slot.reservedUntil) &&
+        new Date(slot.reservedUntil as string) <= now;
+      const isReservedAndActive =
+        slot.status === 'RESERVED' &&
+        Boolean(slot.reservedUntil) &&
+        new Date(slot.reservedUntil as string) > now;
 
-      if (slot.isBooked || slot.status === 'BLOCKED' || slot.status === 'BOOKED' || isReservedAndActive) {
+      if (
+        (slot.isBooked && !reservationExpired) ||
+        slot.status === 'BLOCKED' ||
+        slot.status === 'BOOKED' ||
+        isReservedAndActive
+      ) {
         throw new ConflictError(
           `The ${time} slot on ${date} is already booked or reserved. Please choose a different time.`
         );
       }
 
-      // Mark slot as reserved for 15 minutes pending mock payment
+      // Expired holds are released atomically when another patient claims the slot,
+      // so the booking flow does not depend on a separate cleanup call.
+      if (reservationExpired && slot.appointmentId && slot.appointmentId !== id) {
+        const expiredAppointmentRef = db.collection(collections.appointments).doc(slot.appointmentId);
+        const expiredAppointmentSnap = await tx.get(expiredAppointmentRef);
+        if (expiredAppointmentSnap.exists) {
+          const expiredAppointment = expiredAppointmentSnap.data();
+          if (
+            expiredAppointment &&
+            ['PENDING', 'RESCHEDULED'].includes(expiredAppointment.status) &&
+            !expiredAppointment.paymentId
+          ) {
+            tx.update(expiredAppointmentRef, {
+              status: 'CANCELLED',
+              cancelReason: 'Reservation expired before payment completion',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      // Mark slot as reserved for 15 minutes pending payment
       const reservationExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
       slots[slotIndex].isBooked = true;
       slots[slotIndex].status = 'RESERVED';
