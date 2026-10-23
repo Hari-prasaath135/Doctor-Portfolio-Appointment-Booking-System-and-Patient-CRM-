@@ -30,4 +30,6 @@ Run against a dedicated test project and provider test credentials only:
 9. Doctor/admin dashboards read the same persisted appointment/payment state.
 10. Refund, cancelled checkout, and abandoned reservation cleanup paths behave correctly.
 
-The backend CI unit suite has passed in prior workflow runs, including the time and identity tests. The latest frontend lint passed on the latest completed lint step observed; the production build and the final branch-head CI run still need confirmation. Firebase, payment, email, availability-concurrency, and dashboard integration flows are not claimed as passed by isolated unit tests. They require a dedicated integration-test environment and further mocking/test setup.
+The latest complete CI run on branch head `22de871c8aa84676261fc3426f22297056f11a54` passed frontend lint, the Next.js production build, backend TypeScript compilation, and **54 backend unit tests (54 passed, 0 failed)**. Frontend lint currently reports 143 warnings and zero errors. Firebase, payment, email, availability-concurrency, and dashboard integration flows are not claimed as passed by isolated unit tests; they require dedicated test configuration and further mocking/test setup.
+
+See [Overall Test Report](./OVERALL-TEST-REPORT.md) for the tracked status, exit criteria, and prioritized next steps. The next workstream is appointment/availability integration, followed by payment/webhook integration, email/outbox, and dashboard consistency. Do not rerun existing helper tests without a specific uncovered case or defect.
