@@ -4,6 +4,7 @@ import { appointmentService } from '../services/appointment.service';
 import { notificationService } from '../services/notification.service';
 import { sendSuccess, sendCreated, sendPaginated } from '../utils/response';
 import { UnauthorizedError, ForbiddenError } from '../utils/errors';
+import { resolveDoctorId } from '../utils/identity';
 
 export class AppointmentController {
   /**
@@ -91,7 +92,7 @@ export class AppointmentController {
       if (userRole === 'PATIENT' && appointment.patientId !== userId) {
         throw new ForbiddenError('You can only view your own appointment records');
       }
-      if (userRole === 'DOCTOR' && appointment.doctorId !== userId) {
+      if (userRole === 'DOCTOR' && appointment.doctorId !== resolveDoctorId(req.user)) {
         throw new ForbiddenError('You can only view appointments assigned to you');
       }
 
@@ -103,7 +104,14 @@ export class AppointmentController {
 
   async confirmAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      if (!req.user) throw new UnauthorizedError();
       const id = String(req.params.id);
+      if (req.user.role === 'DOCTOR') {
+        const existing = await appointmentService.getAppointmentById(id);
+        if (existing.doctorId !== resolveDoctorId(req.user)) {
+          throw new ForbiddenError('You can only confirm appointments assigned to you');
+        }
+      }
 
       const appointment = await appointmentService.confirmAppointment(id);
 
@@ -115,7 +123,14 @@ export class AppointmentController {
 
   async completeAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      if (!req.user) throw new UnauthorizedError();
       const id = String(req.params.id);
+      if (req.user.role === 'DOCTOR') {
+        const existing = await appointmentService.getAppointmentById(id);
+        if (existing.doctorId !== resolveDoctorId(req.user)) {
+          throw new ForbiddenError('You can only complete appointments assigned to you');
+        }
+      }
 
       const appointment = await appointmentService.completeAppointment(id);
 
@@ -139,7 +154,7 @@ export class AppointmentController {
       if (userRole === 'PATIENT' && existingAppointment.patientId !== userId) {
         throw new ForbiddenError('You can only cancel your own appointments');
       }
-      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== userId) {
+      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== resolveDoctorId(req.user)) {
         throw new ForbiddenError('You can only cancel appointments assigned to you');
       }
 
