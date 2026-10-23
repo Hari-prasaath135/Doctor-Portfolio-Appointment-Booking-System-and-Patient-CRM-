@@ -101,6 +101,11 @@ function DoctorDashboardContent() {
   }, [])
 
   useEffect(() => {
+    const refreshTimer = setInterval(() => setRefreshKey((value) => value + 1), 30_000)
+    return () => clearInterval(refreshTimer)
+  }, [])
+
+  useEffect(() => {
     if (authLoading) return
     if (!user) {
       setDashboardLoading(false)
@@ -130,7 +135,7 @@ function DoctorDashboardContent() {
         ])
         if (cancelled) return
 
-        const fetchedDays: string[] = datesJson.data?.availableDates || []
+        const availableDays: string[] = datesJson.data?.availableDates || []
         const rawAppointments: Array<Record<string, unknown>> = appointmentsJson.data || []
         const mappedAppointments: Appointment[] = rawAppointments
           .filter((item) => String(item.status || "").toUpperCase() !== "CANCELLED")
@@ -146,6 +151,10 @@ function DoctorDashboardContent() {
             }
           })
 
+        const fetchedDays = [...new Set([
+          ...availableDays,
+          ...mappedAppointments.map((appointment) => appointment.date),
+        ])].filter(Boolean).sort()
         setDays(fetchedDays)
         setSelectedDay((previous) =>
           previous && fetchedDays.includes(previous) ? previous : fetchedDays[0] || ""
