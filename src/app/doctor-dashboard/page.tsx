@@ -19,9 +19,11 @@ import {
   Stethoscope,
 } from "lucide-react"
 import ProtectedRoute from "@/components/auth/ProtectedRoute"
+import { useAuth } from "@/lib/auth-context"
+import { apiUrl } from "@/lib/api"
 
 // ---------- Types ----------
-type SlotStatus = "available" | "booked"
+type SlotStatus = "available" | "booked" | "blocked" | "reserved"
 interface Slot {
   id: string
   startTime: string
@@ -31,7 +33,7 @@ interface Slot {
   capacity: number
 }
 
-type AppointmentStatus = "upcoming" | "completed"
+type AppointmentStatus = "upcoming" | "completed" | "pending"
 interface Appointment {
   id: string
   patientName: string
@@ -47,58 +49,6 @@ interface NotificationItem {
   time: string
 }
 
-// ---------- Mock Data ----------
-const days = ["Mon 8", "Tue 9", "Wed 10", "Thu 11", "Fri 12"]
-
-const slotsByDay: Record<string, Slot[]> = {
-  "Mon 8": [
-    { id: "s1", startTime: "09:00 AM", endTime: "09:30 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s2", startTime: "09:30 AM", endTime: "10:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s3", startTime: "10:00 AM", endTime: "10:30 AM", status: "booked", booked: 1, capacity: 1 },
-    { id: "s4", startTime: "10:30 AM", endTime: "11:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s5", startTime: "11:00 AM", endTime: "11:30 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s6", startTime: "11:30 AM", endTime: "12:00 PM", status: "available", booked: 0, capacity: 1 },
-  ],
-  "Tue 9": [
-    { id: "s7", startTime: "09:00 AM", endTime: "09:30 AM", status: "booked", booked: 1, capacity: 1 },
-    { id: "s8", startTime: "09:30 AM", endTime: "10:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s9", startTime: "10:00 AM", endTime: "10:30 AM", status: "available", booked: 0, capacity: 1 },
-  ],
-}
-
-const appointments: Appointment[] = [
-  {
-    id: "a1",
-    patientName: "Aarav Menon",
-    date: "Mon 8 Sep",
-    time: "09:30 AM",
-    reason: "Follow-up: Varicose Vein Treatment",
-    status: "upcoming",
-  },
-  {
-    id: "a2",
-    patientName: "Priya Suresh",
-    date: "Mon 8 Sep",
-    time: "11:00 AM",
-    reason: "Initial Consultation: Pain Management",
-    status: "upcoming",
-  },
-  {
-    id: "a3",
-    patientName: "Karthik Raja",
-    date: "Fri 5 Sep",
-    time: "02:00 PM",
-    reason: "Post-Procedure Review",
-    status: "completed",
-  },
-]
-
-const notifications: NotificationItem[] = [
-  { id: "n1", message: "Priya Suresh booked a new appointment", time: "5m ago" },
-  { id: "n2", message: "Aarav Menon rescheduled to 09:30 AM", time: "1h ago" },
-  { id: "n3", message: "Karthik Raja's appointment marked completed", time: "3h ago" },
-]
-
 // ---------- Component ----------
 type TabKey = "slots" | "appointments" | "manage"
 
@@ -108,39 +58,226 @@ const tabs: { key: TabKey; label: string; icon: React.ElementType }[] = [
   { key: "manage", label: "Manage Appointments", icon: Settings2 },
 ]
 
+function formatClinicDate(dateString: string): string {
+  const date = new Date(dateString + "T00:00:00")
+  if (Number.isNaN(date.getTime())) return dateString
+  return date.toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  })
+}
+
 function DoctorDashboardContent() {
   const [activeTab, setActiveTab] = useState<TabKey>("slots")
-  const [selectedDay, setSelectedDay] = useState(days[0])
+  const [days, setDays] = useState<string[]>([])
+  const [selectedDay, setSelectedDay] = useState("")
   const [notifOpen, setNotifOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [rescheduleId, setRescheduleId] = useState<string | null>(null)
-  const [appointmentList, setAppointmentList] = useState(appointments)
+  const [appointmentList, setAppointmentList] = useState<Appointment[]>([])
+  const [slotsByDay, setSlotsByDay] = useState<Record<string, Slot[]>>({})
+  const [notifications] = useState<NotificationItem[]>([])
   const [mounted, setMounted] = useState(false)
+  const [dashboardLoading, setDashboardLoading] = useState(true)
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [isSavingAction, setIsSavingAction] = useState(false)
+  const [rescheduleDate, setRescheduleDate] = useState("")
+  const [rescheduleTime, setRescheduleTime] = useState("")
+  const [refreshKey, setRefreshKey] = useState(0)
+  const { user, loading: authLoading } = useAuth()
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => setMounted(true))
     return () => cancelAnimationFrame(frame)
   }, [])
 
-  const currentSlots = slotsByDay[selectedDay] ?? []
-  const upcomingAppointments = appointmentList.filter((a) => a.status === "upcoming")
+  useEffect(() => {
+    if (authLoading) return
+    if (!user) {
+      setDashboardLoading(false)
+      setDashboardError("Please sign in to load your clinic dashboard.")
+      return
+    }
 
-  // Derived stat-card numbers from the mock data above.
-  // "Pending Requests" has no real data model yet on this page — placeholder count.
+    let cancelled = false
+    const loadDashboard = async () => {
+      setDashboardLoading(true)
+      setDashboardError(null)
+      try {
+        const token = await user.getIdToken()
+        const [datesRes, appointmentsRes] = await Promise.all([
+          fetch(apiUrl("/availability/dates?doctorId=dr-vijay-main")),
+          fetch(apiUrl("/appointments?limit=100"), {
+            headers: { Authorization: "Bearer " + token },
+          }),
+        ])
+        if (!datesRes.ok || !appointmentsRes.ok) {
+          throw new Error("Could not load appointment or availability data.")
+        }
+
+        const [datesJson, appointmentsJson] = await Promise.all([
+          datesRes.json(),
+          appointmentsRes.json(),
+        ])
+        if (cancelled) return
+
+        const fetchedDays: string[] = datesJson.data?.availableDates || []
+        const rawAppointments: Array<Record<string, unknown>> = appointmentsJson.data || []
+        const mappedAppointments: Appointment[] = rawAppointments
+          .filter((item) => String(item.status || "").toUpperCase() !== "CANCELLED")
+          .map((item) => {
+            const status = String(item.status || "").toUpperCase()
+            return {
+              id: String(item.id),
+              patientName: String(item.patientName || "Patient"),
+              date: String(item.date || ""),
+              time: String(item.time || ""),
+              reason: String(item.message || item.serviceName || "Consultation"),
+              status: status === "COMPLETED" ? "completed" : status === "PENDING" ? "pending" : "upcoming",
+            }
+          })
+
+        setDays(fetchedDays)
+        setSelectedDay((previous) =>
+          previous && fetchedDays.includes(previous) ? previous : fetchedDays[0] || ""
+        )
+        setAppointmentList(mappedAppointments)
+      } catch (error) {
+        if (!cancelled) {
+          setDashboardError(
+            error instanceof Error ? error.message : "Could not load clinic dashboard data."
+          )
+        }
+      } finally {
+        if (!cancelled) setDashboardLoading(false)
+      }
+    }
+
+    void loadDashboard()
+    return () => {
+      cancelled = true
+    }
+  }, [user, authLoading, refreshKey])
+
+  useEffect(() => {
+    if (!selectedDay) return
+    let cancelled = false
+    const loadSlots = async () => {
+      try {
+        const res = await fetch(
+          apiUrl("/availability/slots?doctorId=dr-vijay-main&date=" + encodeURIComponent(selectedDay))
+        )
+        if (!res.ok) throw new Error("Could not load slots for this date.")
+        const json = await res.json()
+        if (cancelled) return
+        const data = json.data
+        const mapped: Slot[] = (data?.slots || []).map((slot: {
+          time: string
+          endTime?: string
+          isBooked?: boolean
+          status?: string
+        }, index: number) => {
+          const rawStatus = String(slot.status || "").toUpperCase()
+          const status: SlotStatus =
+            rawStatus === "BLOCKED" ? "blocked" :
+            rawStatus === "RESERVED" ? "reserved" :
+            slot.isBooked || rawStatus === "BOOKED" ? "booked" : "available"
+          return {
+            id: selectedDay + "-" + slot.time + "-" + index,
+            startTime: slot.time,
+            endTime: slot.endTime || "",
+            status,
+            booked: status === "booked" || status === "reserved" ? 1 : 0,
+            capacity: 1,
+          }
+        })
+        setSlotsByDay((previous) => ({ ...previous, [selectedDay]: mapped }))
+      } catch (error) {
+        if (!cancelled) {
+          setSlotsByDay((previous) => ({ ...previous, [selectedDay]: [] }))
+          setDashboardError(error instanceof Error ? error.message : "Could not load slots.")
+        }
+      }
+    }
+    void loadSlots()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDay, refreshKey])
+
+  const currentSlots = slotsByDay[selectedDay] ?? []
+  const upcomingAppointments = appointmentList.filter((a) => a.status !== "completed")
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
   const todaysAppointmentsCount = appointmentList.filter(
-    (a) => a.date === "Mon 8 Sep" && a.status === "upcoming"
+    (a) => a.date === today && a.status !== "completed"
   ).length
   const availableSlotsToday = currentSlots.filter((s) => s.status === "available").length
-  const pendingRequestsCount = 2 // placeholder — no backing data yet
+  const pendingRequestsCount = appointmentList.filter((a) => a.status === "pending").length
 
-  const handleCancel = (id: string) => {
-    setAppointmentList((prev) => prev.filter((a) => a.id !== id))
+  const handleCancel = async (id: string) => {
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/appointments/" + encodeURIComponent(id) + "/cancel"), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({ reason: "Cancelled by doctor from dashboard" }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || "Appointment cancellation failed.")
+      setAppointmentList((previous) => previous.filter((appointment) => appointment.id !== id))
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Appointment cancellation failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
   }
 
-  const handleReschedule = (id: string) => {
-    setRescheduleId(null)
-    // Hook up real reschedule logic (date/time picker + API call) here.
-    alert(`Reschedule flow for appointment ${id} would open here.`)
+  const handleReschedule = async (id: string) => {
+    if (!rescheduleDate || !rescheduleTime) {
+      setActionError("Choose a new date and time before rescheduling.")
+      return
+    }
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/appointments/" + encodeURIComponent(id) + "/reschedule"), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({ newDate: rescheduleDate, newTime: rescheduleTime }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || "Appointment rescheduling failed.")
+      setAppointmentList((previous) =>
+        previous.map((appointment) =>
+          appointment.id === id
+            ? { ...appointment, date: rescheduleDate, time: rescheduleTime, status: "upcoming" }
+            : appointment
+        )
+      )
+      setRescheduleId(null)
+      setRescheduleDate("")
+      setRescheduleTime("")
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Appointment rescheduling failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
   }
 
   return (
