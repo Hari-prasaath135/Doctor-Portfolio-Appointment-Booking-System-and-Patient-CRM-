@@ -355,19 +355,47 @@ export class AppointmentService {
       if (newIdx === -1) throw new NotFoundError(`Slot ${newTime}`);
 
       const targetSlot = newSlots[newIdx];
+      const now = new Date();
+      const targetReservationExpired =
+        targetSlot.status === 'RESERVED' &&
+        Boolean(targetSlot.reservedUntil) &&
+        new Date(targetSlot.reservedUntil as string) <= now;
       const reservationActive =
         targetSlot.status === 'RESERVED' &&
-        targetSlot.reservedUntil &&
-        new Date(targetSlot.reservedUntil) > new Date();
+        Boolean(targetSlot.reservedUntil) &&
+        new Date(targetSlot.reservedUntil as string) > now;
       const targetIsOldSlot = sameAvailability && oldIdx === newIdx;
       if (
         !targetIsOldSlot &&
-        (targetSlot.isBooked ||
+        ((targetSlot.isBooked && !targetReservationExpired) ||
           targetSlot.status === 'BOOKED' ||
           targetSlot.status === 'BLOCKED' ||
           reservationActive)
       ) {
         throw new ConflictError(`Slot ${newTime} on ${newDate} is already booked or reserved`);
+      }
+
+      if (
+        targetReservationExpired &&
+        targetSlot.appointmentId &&
+        targetSlot.appointmentId !== id
+      ) {
+        const expiredAppointmentRef = db.collection(collections.appointments).doc(targetSlot.appointmentId);
+        const expiredAppointmentSnap = await tx.get(expiredAppointmentRef);
+        if (expiredAppointmentSnap.exists) {
+          const expiredAppointment = expiredAppointmentSnap.data();
+          if (
+            expiredAppointment &&
+            ['PENDING', 'RESCHEDULED'].includes(expiredAppointment.status) &&
+            !expiredAppointment.paymentId
+          ) {
+            tx.update(expiredAppointmentRef, {
+              status: 'CANCELLED',
+              cancelReason: 'Reservation expired before payment completion',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
       }
 
       if (oldIdx !== -1) {
