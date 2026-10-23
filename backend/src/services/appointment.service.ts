@@ -56,7 +56,7 @@ export class AppointmentService {
     const matchedType = consultationTypes.find(
       (c: { type: string; feeInPaise: number }) => c.type === input.consultationType
     );
-    const authoritativeFee = matchedType ? matchedType.feeInPaise : (input.consultationType === 'VIDEO' ? 80000 : 100000);
+    let authoritativeFee = matchedType ? matchedType.feeInPaise : (input.consultationType === 'VIDEO' ? 80000 : 100000);
 
     // Calculate age if date of birth is provided
     let calculatedAge = input.age;
@@ -76,7 +76,27 @@ export class AppointmentService {
 
     await db.runTransaction(async (tx) => {
       const latestAvailability = await tx.get(availabilityRef);
-      const slots = latestAvailability.data()?.slots || [];
+      const latestAvailabilityData = latestAvailability.data();
+
+      // Revalidate schedule state inside the transaction. The schedule may have
+      // been unpublished or marked as leave after the initial query above.
+      if (!latestAvailabilityData || latestAvailabilityData.isLeave) {
+        throw new ConflictError(`Doctor is unavailable on ${date}`);
+      }
+      if (latestAvailabilityData.isPublished === false) {
+        throw new ConflictError(`Consultation schedule for ${date} is not published`);
+      }
+
+      // Use the current schedule's fee, not a stale pre-transaction snapshot.
+      const latestConsultationTypes = latestAvailabilityData.consultationTypes || [];
+      const latestMatchedType = latestConsultationTypes.find(
+        (c: { type: string; feeInPaise: number }) => c.type === input.consultationType
+      );
+      authoritativeFee = latestMatchedType
+        ? latestMatchedType.feeInPaise
+        : (input.consultationType === 'VIDEO' ? 80000 : 100000);
+
+      const slots = latestAvailabilityData.slots || [];
 
       const slotIndex = slots.findIndex(
         (s: { time: string; isBooked: boolean; status?: string; reservedUntil?: string | null }) => s.time === time
