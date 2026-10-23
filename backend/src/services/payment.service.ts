@@ -13,6 +13,7 @@ import { v4 as uuid } from 'uuid';
 import { getRazorpayConfig, getRazorpayClient } from '../config/razorpay';
 import { appointmentService } from './appointment.service';
 import { notificationService } from './notification.service';
+import { safeCompareHexSignature } from '../utils/signatures';
 
 export interface CreateRazorpayOrderInput {
   appointmentId: string;
@@ -239,7 +240,7 @@ export class PaymentService {
       .update(payload)
       .digest('hex');
 
-    if (expectedSignature !== input.razorpaySignature) {
+    if (!safeCompareHexSignature(expectedSignature, input.razorpaySignature)) {
       logger.warn(`Signature mismatch for order ${input.razorpayOrderId}`);
       await paymentDoc.ref.update({
         status: 'FAILED',
@@ -365,7 +366,7 @@ export class PaymentService {
       .update(rawBody)
       .digest('hex');
 
-    if (expectedSignature !== signature) {
+    if (!safeCompareHexSignature(expectedSignature, signature)) {
       logger.warn('Razorpay webhook signature verification failed');
       throw new BadRequestError('Invalid webhook signature');
     }
