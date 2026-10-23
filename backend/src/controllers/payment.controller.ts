@@ -5,6 +5,7 @@ import { appointmentService } from '../services/appointment.service';
 import { sendSuccess, sendCreated } from '../utils/response';
 import { UnauthorizedError, ForbiddenError, BadRequestError } from '../utils/errors';
 import { logger } from '../utils/logger';
+import { assertAppointmentAccess } from '../utils/appointment-access';
 
 export class PaymentController {
   /**
@@ -102,13 +103,8 @@ export class PaymentController {
 
       const id = String(req.params.id);
       const payment = await paymentService.getPaymentById(id);
-
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      if (userRole === 'PATIENT' && payment.patientId !== userId) {
-        throw new ForbiddenError('You can only view your own payment records');
-      }
+      const appointment = await appointmentService.getAppointmentById(payment.appointmentId);
+      assertAppointmentAccess(req.user, appointment);
 
       sendSuccess(res, {
         id: payment.id,
@@ -120,6 +116,25 @@ export class PaymentController {
         paymentId: payment.paymentId,
         paidAt: payment.paidAt,
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * GET /api/v1/payments/appointment/:appointmentId
+   * Only the appointment owner, assigned doctor, or an admin may view its payment.
+   */
+  async getPaymentByAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!req.user) throw new UnauthorizedError();
+
+      const appointmentId = String(req.params.appointmentId);
+      const appointment = await appointmentService.getAppointmentById(appointmentId);
+      assertAppointmentAccess(req.user, appointment);
+
+      const payment = await paymentService.getPaymentByAppointment(appointmentId);
+      sendSuccess(res, payment);
     } catch (err) {
       next(err);
     }
