@@ -10,6 +10,7 @@ import {
 import { NotFoundError, ConflictError, ForbiddenError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
+import { canReleaseAppointmentSlot } from '../utils/appointment-slot';
 
 export class AppointmentService {
   /**
@@ -288,12 +289,7 @@ export class AppointmentService {
           const slot = slots[slotIndex];
           // Do not free a slot that has since been assigned to a different
           // appointment or patient.
-          const belongsToAnotherAppointment =
-            Boolean(slot.appointmentId) && slot.appointmentId !== id;
-          const belongsToAnotherPatient =
-            Boolean(slot.reservedBy) && slot.reservedBy !== appointment.patientId;
-
-          if (!belongsToAnotherAppointment && !belongsToAnotherPatient) {
+          if (canReleaseAppointmentSlot(slot, id, appointment.patientId)) {
             slots[slotIndex] = {
               ...slot,
               isBooked: false,
