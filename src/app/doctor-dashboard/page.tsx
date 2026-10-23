@@ -421,7 +421,7 @@ function DoctorDashboardContent() {
             </div>
             <div className="flex items-center gap-2 text-sm text-text-secondary">
               <Calendar className="w-4 h-4" />
-              Mon, 8 Sep 2026
+              {new Date().toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })}
             </div>
           </div>
 
@@ -456,7 +456,7 @@ function DoctorDashboardContent() {
                 <Clock className="w-5 h-5" />
               </div>
               <div>
-                <p className="text-text-secondary text-sm">Available Slots Today</p>
+                <p className="text-text-secondary text-sm">Available Slots</p>
                 <p className="font-heading font-bold text-2xl text-deep-trust">
                   {availableSlotsToday}
                 </p>
@@ -475,6 +475,13 @@ function DoctorDashboardContent() {
               </div>
             </div>
           </div>
+
+          {(dashboardError || actionError) && (
+            <div role="alert" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              {actionError || dashboardError}
+              <button type="button" onClick={() => setActionError(null)} className="ml-3 underline">Dismiss</button>
+            </div>
+          )}
 
           {/* Card containing underlined sub-tabs + content */}
           <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-6">
@@ -516,7 +523,7 @@ function DoctorDashboardContent() {
                     >
                       {days.map((day) => (
                         <option key={day} value={day}>
-                          {day}
+                          {formatClinicDate(day)}
                         </option>
                       ))}
                     </select>
@@ -541,17 +548,21 @@ function DoctorDashboardContent() {
                       {currentSlots.map((slot) => (
                         <tr key={slot.id} className="border-b border-gray-50 last:border-0">
                           <td className="py-4 text-text-primary">
-                            {slot.startTime} – {slot.endTime}
+                            {slot.endTime ? slot.startTime + " – " + slot.endTime : slot.startTime}
                           </td>
                           <td className="py-4">
                             <span
                               className={`px-3 py-1 rounded-full text-xs font-medium ${
                                 slot.status === "available"
                                   ? "bg-emerald-50 text-emerald-700"
+                                  : slot.status === "blocked"
+                                  ? "bg-red-50 text-red-700"
+                                  : slot.status === "reserved"
+                                  ? "bg-amber-50 text-amber-700"
                                   : "bg-soft-sky text-medical-blue"
                               }`}
                             >
-                              {slot.status === "available" ? "Available" : "Booked"}
+                              {slot.status === "available" ? "Available" : slot.status === "blocked" ? "Blocked" : slot.status === "reserved" ? "Reserved" : "Booked"}
                             </span>
                           </td>
                           <td className="py-4 text-text-primary">
@@ -587,6 +598,7 @@ function DoctorDashboardContent() {
                   Booked Appointments
                 </h2>
                 <div className="space-y-3">
+                  {dashboardLoading && <p className="text-sm text-text-secondary">Loading appointments...</p>}
                   {appointmentList.map((appt) => (
                     <div
                       key={appt.id}
@@ -607,22 +619,24 @@ function DoctorDashboardContent() {
                       </div>
                       <div className="flex items-center justify-between sm:justify-end gap-4 flex-shrink-0">
                         <div className="text-right">
-                          <p className="text-sm font-medium text-deep-trust">{appt.date}</p>
+                          <p className="text-sm font-medium text-deep-trust">{formatClinicDate(appt.date)}</p>
                           <p className="text-xs text-text-secondary">{appt.time}</p>
                         </div>
                         <span
                           className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium flex-shrink-0 ${
-                            appt.status === "upcoming"
-                              ? "bg-soft-sky text-medical-blue"
-                              : "bg-emerald-50 text-emerald-700"
+                            appt.status === "completed"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : appt.status === "pending"
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-soft-sky text-medical-blue"
                           }`}
                         >
-                          {appt.status === "upcoming" ? (
+                          {appt.status !== "completed" ? (
                             <Clock className="w-3 h-3" />
                           ) : (
                             <CheckCircle2 className="w-3 h-3" />
                           )}
-                          {appt.status === "upcoming" ? "Upcoming" : "Completed"}
+                          {appt.status === "completed" ? "Completed" : appt.status === "pending" ? "Awaiting payment" : "Upcoming"}
                         </span>
                       </div>
                     </div>
@@ -652,7 +666,7 @@ function DoctorDashboardContent() {
                             {appt.patientName}
                           </p>
                           <p className="text-text-secondary text-xs truncate">
-                            {appt.date} · {appt.time}
+                            {formatClinicDate(appt.date)} · {appt.time}
                           </p>
                         </div>
                       </div>
@@ -667,7 +681,8 @@ function DoctorDashboardContent() {
                         </button>
                         <button
                           onClick={() => handleCancel(appt.id)}
-                          className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors cursor-pointer whitespace-nowrap"
+                          disabled={isSavingAction}
+                          className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                         >
                           <XCircle className="w-4 h-4" />
                           Cancel
@@ -703,14 +718,33 @@ function DoctorDashboardContent() {
                 <X className="w-4 h-4 text-deep-trust" />
               </button>
             </div>
-            <p className="text-sm text-text-secondary mb-6">
-              Plug in your date/time picker here before calling the reschedule API.
-            </p>
+            <div className="space-y-3 mb-5">
+              <label className="block text-sm text-text-secondary">
+                New date
+                <input
+                  type="date"
+                  min={new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })}
+                  value={rescheduleDate}
+                  onChange={(event) => setRescheduleDate(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-text-primary"
+                />
+              </label>
+              <label className="block text-sm text-text-secondary">
+                New time
+                <input
+                  type="time"
+                  value={rescheduleTime}
+                  onChange={(event) => setRescheduleTime(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-text-primary"
+                />
+              </label>
+            </div>
             <button
+              disabled={isSavingAction}
               onClick={() => handleReschedule(rescheduleId)}
-              className="w-full bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl py-2.5 text-sm font-semibold shadow-md cursor-pointer"
+              className="w-full bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl py-2.5 text-sm font-semibold shadow-md cursor-pointer disabled:opacity-50"
             >
-              Confirm Reschedule
+              {isSavingAction ? "Saving..." : "Confirm Reschedule"}
             </button>
           </div>
         </div>
