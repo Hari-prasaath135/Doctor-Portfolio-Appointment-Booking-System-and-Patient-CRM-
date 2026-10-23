@@ -29,6 +29,7 @@ import { doctorInfo } from "@/lib/data"
 import { auth } from "@/lib/firebase-client"
 import { onAuthStateChanged, User as FirebaseUser } from "firebase/auth"
 import { trackEvent } from "@/lib/analytics"
+import { apiUrl } from "@/lib/api"
 
 export type ConsultationType = "IN_PERSON" | "VIDEO" | "FOLLOW_UP"
 
@@ -124,6 +125,8 @@ export default function BookingWizard() {
   const [slots, setSlots] = useState<{ time: string; isAvailable: boolean }[]>([])
   const [loadingDates, setLoadingDates] = useState(false)
   const [loadingSlots, setLoadingSlots] = useState(false)
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null)
+  const [slotsError, setSlotsError] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isOpeningCheckout, setIsOpeningCheckout] = useState(false)
@@ -158,27 +161,22 @@ export default function BookingWizard() {
     const fetchDates = async () => {
       setLoadingDates(true)
       try {
-        const res = await fetch(`http://localhost:5000/api/v1/availability/dates?doctorId=${doctorInfo.id}`)
-        if (res.ok) {
-          const json = await res.json()
-          if (!cancelled) {
-            const fetched = json.data?.availableDates || []
-            setAvailableDates(fetched)
-            if (fetched.length > 0 && !booking.date) {
-              setBooking((prev) => ({ ...prev, date: fetched[0] }))
-            }
+        const datesUrl = apiUrl("/availability/dates?doctorId=" + encodeURIComponent(doctorInfo.id))
+        const res = await fetch(datesUrl)
+        if (!res.ok) throw new Error("Failed to load clinic availability.")
+        const json = await res.json()
+        if (!cancelled) {
+          const fetched: string[] = json.data?.availableDates || []
+          setAvailableDates(fetched)
+          setAvailabilityError(null)
+          if (fetched.length > 0 && !booking.date) {
+            setBooking((prev) => ({ ...prev, date: fetched[0] }))
           }
         }
       } catch {
-        // Fallback upcoming 10 days
         if (!cancelled) {
-          const fallback = Array.from({ length: 7 }, (_, i) => {
-            const d = new Date()
-            d.setDate(d.getDate() + i + 1)
-            return d.toISOString().split("T")[0]
-          })
-          setAvailableDates(fallback)
-          if (!booking.date) setBooking((prev) => ({ ...prev, date: fallback[0] }))
+          setAvailableDates([])
+          setAvailabilityError("Unable to load clinic availability. Please try again later.")
         }
       } finally {
         if (!cancelled) setLoadingDates(false)
@@ -198,39 +196,33 @@ export default function BookingWizard() {
     const fetchSlots = async () => {
       setLoadingSlots(true)
       try {
-        const res = await fetch(
-          `http://localhost:5000/api/v1/availability/slots?doctorId=${doctorInfo.id}&date=${booking.date}`
+        const slotsUrl = apiUrl(
+          "/availability/slots?doctorId=" + encodeURIComponent(doctorInfo.id) +
+          "&date=" + encodeURIComponent(booking.date)
         )
-        if (res.ok) {
-          const json = await res.json()
-          const data = json.data
-          if (!cancelled) {
-            if (data.isLeave || data.isPublished === false) {
-              setSlots([])
-            } else {
-              const allSlots = data.slots || []
-              const freeList: string[] = data.freeSlots || []
-              const mapped = allSlots.map((s: { time: string }) => ({
-                time: s.time,
-                isAvailable: freeList.includes(s.time),
-              }))
-              setSlots(mapped)
-            }
+        const res = await fetch(slotsUrl)
+        if (!res.ok) throw new Error("Failed to load slots.")
+        const json = await res.json()
+        const data = json.data
+        if (!cancelled) {
+          if (!data || data.isLeave || data.isPublished === false) {
+            setSlots([])
+          } else {
+            const allSlots: { time: string }[] = data.slots || []
+            const freeList: string[] = data.freeSlots || []
+            const mapped = allSlots.map((s) => ({
+              time: s.time,
+              isAvailable: freeList.includes(s.time),
+            }))
+            setSlots(mapped)
           }
-        } else {
-          throw new Error("Failed to load slots")
+          setSlotsError(null)
         }
       } catch {
         if (!cancelled) {
-          setSlots([
-            { time: "09:00", isAvailable: true },
-            { time: "09:45", isAvailable: true },
-            { time: "10:30", isAvailable: false },
-            { time: "11:15", isAvailable: true },
-            { time: "14:00", isAvailable: true },
-            { time: "14:45", isAvailable: true },
-            { time: "15:30", isAvailable: true },
-          ])
+          setSlots([])
+          setBooking((prev) => ({ ...prev, time: "" }))
+          setSlotsError("Unable to load time slots. Please retry before booking.")
         }
       } finally {
         if (!cancelled) setLoadingSlots(false)
@@ -392,7 +384,7 @@ export default function BookingWizard() {
       if (!idToken) throw new Error("Authentication expired. Please sign in again.")
 
       // 1. Create Razorpay order via backend
-      const orderRes = await fetch("http://localhost:5000/api/v1/payments/orders", {
+      const orderRes = await fetch(apiUrl("/payments/orders"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -434,7 +426,7 @@ export default function BookingWizard() {
           try {
             // 3. Verify checkout response authoritatively on the backend
             const verifyToken = await currentUser.getIdToken()
-            const verifyRes = await fetch("http://localhost:5000/api/v1/payments/verify", {
+            const verifyRes = await fetch(apiUrl("/payments/verify"), {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -535,7 +527,7 @@ export default function BookingWizard() {
         attachments: booking.attachments,
       }
 
-      const res = await fetch("http://localhost:5000/api/v1/appointments", {
+      const res = await fetch(apiUrl("/appointments"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -712,7 +704,7 @@ export default function BookingWizard() {
                     </div>
                   ) : availableDates.length === 0 ? (
                     <p className="text-xs text-amber-600 bg-amber-50 p-3 rounded-xl">
-                      No published dates available at this time. Please check back soon.
+                      {availabilityError || "No published dates available at this time. Please check back soon."}
                     </p>
                   ) : (
                     <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
@@ -758,7 +750,7 @@ export default function BookingWizard() {
                     </div>
                   ) : slots.length === 0 ? (
                     <p className="text-xs text-text-secondary py-4 text-center">
-                      No slots available for this date.
+                      {slotsError || "No slots available for this date."}
                     </p>
                   ) : (
                     <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
