@@ -463,6 +463,7 @@ export default function BookingWizard() {
             setPaymentError(err.message || "Failed to verify payment with clinic server.")
           } finally {
             setIsSubmitting(false)
+            setIsOpeningCheckout(false)
           }
         },
         prefill: {
@@ -503,6 +504,13 @@ export default function BookingWizard() {
     setPaymentError(null)
 
     try {
+      // Reopening checkout must reuse the existing reservation instead of creating
+      // a second appointment when the patient previously dismissed or failed payment.
+      if (reservationSuccess) {
+        await launchRazorpayCheckout(reservationSuccess.appointmentId, reservationSuccess.fee)
+        return
+      }
+
       if (!currentUser) {
         throw new Error("You must be signed in with your verified account to reserve an appointment.")
       }
