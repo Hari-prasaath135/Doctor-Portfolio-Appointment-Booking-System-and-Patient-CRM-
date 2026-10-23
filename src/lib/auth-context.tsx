@@ -105,7 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       let authoritativeRole = "PATIENT"
       const idToken = await signedInUser.getIdToken()
       try {
-        const res = await fetch(`${API_BASE_URL}/auth/verify`, {
+        const res = await fetch(apiUrl("/auth/verify"), {
           method: "POST",
           headers: {
             Authorization: `Bearer ${idToken}`,
