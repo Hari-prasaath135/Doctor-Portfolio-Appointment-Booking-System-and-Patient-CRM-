@@ -86,15 +86,15 @@ export class AppointmentService {
       }
 
       const slot = slots[slotIndex];
-      const now = new Date();
+      const currentTime = new Date();
       const reservationExpired =
         slot.status === 'RESERVED' &&
         Boolean(slot.reservedUntil) &&
-        new Date(slot.reservedUntil as string) <= now;
+        new Date(slot.reservedUntil as string) <= currentTime;
       const isReservedAndActive =
         slot.status === 'RESERVED' &&
         Boolean(slot.reservedUntil) &&
-        new Date(slot.reservedUntil as string) > now;
+        new Date(slot.reservedUntil as string) > currentTime;
 
       if (
         (slot.isBooked && !reservationExpired) ||
