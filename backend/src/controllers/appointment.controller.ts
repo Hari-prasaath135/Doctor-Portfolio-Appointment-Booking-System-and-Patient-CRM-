@@ -68,7 +68,7 @@ export class AppointmentController {
             : req.query.patientId as string | undefined,
         doctorId:
           role === 'DOCTOR'
-            ? req.user.uid
+            ? resolveDoctorId(req.user)
             : req.query.doctorId as string | undefined,
       });
 
@@ -192,7 +192,7 @@ export class AppointmentController {
       if (userRole === 'PATIENT' && existingAppointment.patientId !== userId) {
         throw new ForbiddenError('You can only reschedule your own appointments');
       }
-      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== userId) {
+      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== resolveDoctorId(req.user)) {
         throw new ForbiddenError('You can only reschedule appointments assigned to you');
       }
 
