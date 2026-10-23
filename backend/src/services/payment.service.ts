@@ -378,21 +378,53 @@ export class PaymentService {
       throw new BadRequestError('Missing webhook event ID');
     }
 
-    // 2. Durable Deduplication: check webhookEvents collection
+    // 2. Atomically claim the event. Failed events and expired processing leases
+    // may be retried; completed events are permanently deduplicated.
     const eventRef = db.collection(collections.webhookEvents).doc(eventId);
-    const eventSnap = await eventRef.get();
-    if (eventSnap.exists) {
-      logger.info(`Webhook event ${eventId} already processed. Skipping.`);
-      return { status: 'DUPLICATE_IGNORED' };
-    }
+    let claimResult: 'CLAIMED' | 'DUPLICATE' | 'PROCESSING' = 'CLAIMED';
+    const nowMs = Date.now();
 
-    await eventRef.set({
-      id: eventId,
-      event: eventType,
-      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+    await db.runTransaction(async (tx) => {
+      const eventSnap = await tx.get(eventRef);
+      const existing = eventSnap.exists ? eventSnap.data() : undefined;
+
+      if (existing?.status === 'PROCESSED') {
+        claimResult = 'DUPLICATE';
+        return;
+      }
+
+      if (
+        existing?.status === 'PROCESSING' &&
+        typeof existing.processingLeaseUntil === 'number' &&
+        existing.processingLeaseUntil > nowMs
+      ) {
+        claimResult = 'PROCESSING';
+        return;
+      }
+
+      tx.set(eventRef, {
+        id: eventId,
+        event: eventType,
+        status: 'PROCESSING',
+        receivedAt: existing?.receivedAt || admin.firestore.FieldValue.serverTimestamp(),
+        processingStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processingLeaseUntil: nowMs + 60_000,
+        attemptCount: (typeof existing?.attemptCount === 'number' ? existing.attemptCount : 0) + 1,
+      }, { merge: true });
+      claimResult = 'CLAIMED';
     });
 
-    logger.info(`Processing Razorpay webhook event: ${eventType} (ID: ${eventId})`);
+    if (claimResult === 'DUPLICATE') {
+      logger.info(`Webhook event ${eventId} already completed. Skipping duplicate.`);
+      return { status: 'DUPLICATE_IGNORED' };
+    }
+    if (claimResult === 'PROCESSING') {
+      logger.info(`Webhook event ${eventId} is already being processed.`);
+      return { status: 'ALREADY_PROCESSING' };
+    }
+
+    try {
+      logger.info(`Processing Razorpay webhook event: ${eventType} (ID: ${eventId})`);
 
     // 3. Handle Events
     if (eventType === 'payment.captured') {
@@ -403,6 +435,11 @@ export class PaymentService {
 
       if (!orderId) {
         logger.warn('Webhook payment.captured missing order_id');
+        await eventRef.update({
+          status: 'PROCESSED',
+          result: 'SKIPPED_NO_ORDER_ID',
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
         return { status: 'SKIPPED_NO_ORDER_ID' };
       }
 
@@ -481,7 +518,25 @@ export class PaymentService {
       }
     }
 
-    return { status: 'PROCESSED' };
+      await eventRef.update({
+        status: 'PROCESSED',
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processingLeaseUntil: null,
+      });
+      return { status: 'PROCESSED' };
+    } catch (error) {
+      try {
+        await eventRef.update({
+          status: 'FAILED',
+          failureReason: error instanceof Error ? error.message : 'Unknown webhook processing error',
+          failedAt: admin.firestore.FieldValue.serverTimestamp(),
+          processingLeaseUntil: null,
+        });
+      } catch (markFailedError) {
+        logger.error(`Unable to record failed webhook event ${eventId}`, markFailedError);
+      }
+      throw error;
+    }
   }
 
   /**
