@@ -248,43 +248,92 @@ export class AppointmentService {
    * Cancel appointment and release the slot.
    */
   async cancelAppointment(id: string, reason: string): Promise<Appointment> {
-    const appointment = await this.getAppointmentById(id);
+    const appointmentRef = db.collection(collections.appointments).doc(id);
+    let result: Appointment | undefined;
 
-    if (appointment.status === 'COMPLETED') {
-      throw new ForbiddenError('Cannot cancel a completed appointment');
-    }
+    // Keep appointment state and slot release in one transaction. Separate
+    // writes can otherwise leave a cancelled appointment occupying a slot or
+    // release a slot while the appointment remains active.
+    await db.runTransaction(async (tx) => {
+      const appointmentSnap = await tx.get(appointmentRef);
+      if (!appointmentSnap.exists) throw new NotFoundError('Appointment');
 
-    // Release the availability slot
-    const availabilitySnap = await db
-      .collection(collections.availability)
-      .where('doctorId', '==', appointment.doctorId)
-      .where('date', '==', appointment.date)
-      .limit(1)
-      .get();
+      const appointment = {
+        id: appointmentSnap.id,
+        ...appointmentSnap.data(),
+      } as Appointment;
 
-    if (!availabilitySnap.empty) {
-      const availRef = availabilitySnap.docs[0].ref;
-      const slots = availabilitySnap.docs[0].data().slots || [];
-      const idx = slots.findIndex(
-        (s: { time: string; isBooked: boolean }) => s.time === appointment.time
-      );
-      if (idx !== -1) {
-        slots[idx].isBooked = false;
-        slots[idx].status = 'AVAILABLE';
-        delete slots[idx].appointmentId;
-        delete slots[idx].reservedUntil;
-        delete slots[idx].reservedBy;
-        await availRef.update({
-          slots,
+      if (appointment.status === 'COMPLETED') {
+        throw new ForbiddenError('Cannot cancel a completed appointment');
+      }
+
+      const availabilityQuery = db
+        .collection(collections.availability)
+        .where('doctorId', '==', appointment.doctorId)
+        .where('date', '==', appointment.date)
+        .limit(1);
+      const availabilitySnap = await tx.get(availabilityQuery);
+
+      let shouldUpdateAppointment = appointment.status !== 'CANCELLED';
+      if (!availabilitySnap.empty) {
+        const availabilityDoc = availabilitySnap.docs[0];
+        const availabilityData = availabilityDoc.data();
+        const slots = [...(availabilityData.slots || [])];
+        const slotIndex = slots.findIndex(
+          (slot: { time: string; appointmentId?: string | null; reservedBy?: string | null }) =>
+            slot.time === appointment.time
+        );
+
+        if (slotIndex !== -1) {
+          const slot = slots[slotIndex];
+          // Do not free a slot that has since been assigned to a different
+          // appointment or patient.
+          const belongsToAnotherAppointment =
+            Boolean(slot.appointmentId) && slot.appointmentId !== id;
+          const belongsToAnotherPatient =
+            Boolean(slot.reservedBy) && slot.reservedBy !== appointment.patientId;
+
+          if (!belongsToAnotherAppointment && !belongsToAnotherPatient) {
+            slots[slotIndex] = {
+              ...slot,
+              isBooked: false,
+              status: 'AVAILABLE',
+            };
+            delete slots[slotIndex].appointmentId;
+            delete slots[slotIndex].reservedUntil;
+            delete slots[slotIndex].reservedBy;
+
+            tx.update(availabilityDoc.ref, {
+              slots,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      if (shouldUpdateAppointment) {
+        const cancelledAt = admin.firestore.Timestamp.now();
+        tx.update(appointmentRef, {
+          status: 'CANCELLED',
+          cancelReason: reason,
+          cancelledAt,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+        result = {
+          ...appointment,
+          status: 'CANCELLED',
+          cancelReason: reason,
+          cancelledAt,
+        };
+      } else {
+        // Idempotent retry: reconcile a stale slot if it still belongs to this
+        // appointment, without overwriting the original cancellation metadata.
+        result = appointment;
       }
-    }
-
-    return this.updateStatus(id, 'CANCELLED', {
-      cancelReason: reason,
-      cancelledAt: admin.firestore.Timestamp.now(),
     });
+
+    if (!result) throw new Error('Cancellation transaction completed without an appointment result');
+    return result;
   }
 
   /**
