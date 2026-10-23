@@ -15,6 +15,7 @@ import { appointmentService } from './appointment.service';
 import { notificationService } from './notification.service';
 import { safeCompareHexSignature } from '../utils/signatures';
 import { decideWebhookClaim } from '../utils/webhook-claim';
+import { isCapturedPaymentConsistent } from '../utils/payment-validation';
 
 export interface CreateRazorpayOrderInput {
   appointmentId: string;
@@ -438,7 +439,7 @@ export class PaymentService {
         const pData = paymentSnap.docs[0].data() as Payment;
 
         // Never confirm or mark a payment captured based on a mismatched webhook payload.
-        if (!paymentId || amount !== pData.amount || currency !== 'INR') {
+        if (!isCapturedPaymentConsistent({ paymentId, amount, currency }, pData.amount, 'INR')) {
           const reason = `Webhook amount/currency/payment ID mismatch for order ${orderId}`;
           logger.error(reason);
           await paymentDoc.ref.update({
