@@ -152,7 +152,7 @@ export class AppointmentController {
 
       notificationService
         .createNotification(
-          req.user.uid,
+          existingAppointment.patientId,
           'APPOINTMENT_CANCELLED',
           'Appointment Cancelled',
           `Your appointment on ${appointment.date} has been cancelled.`
