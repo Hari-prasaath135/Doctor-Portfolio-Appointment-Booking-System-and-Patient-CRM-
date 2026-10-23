@@ -87,6 +87,12 @@ function DoctorDashboardContent() {
   const [rescheduleDate, setRescheduleDate] = useState("")
   const [rescheduleTime, setRescheduleTime] = useState("")
   const [refreshKey, setRefreshKey] = useState(0)
+  const [showScheduleForm, setShowScheduleForm] = useState(false)
+  const [scheduleDate, setScheduleDate] = useState("")
+  const [scheduleStartTime, setScheduleStartTime] = useState("09:00")
+  const [scheduleEndTime, setScheduleEndTime] = useState("17:00")
+  const [scheduleDuration, setScheduleDuration] = useState("30")
+  const [scheduleBuffer, setScheduleBuffer] = useState("10")
   const { user, loading: authLoading } = useAuth()
 
   useEffect(() => {
@@ -216,6 +222,54 @@ function DoctorDashboardContent() {
   ).length
   const availableSlotsToday = currentSlots.filter((s) => s.status === "available").length
   const pendingRequestsCount = appointmentList.filter((a) => a.status === "pending").length
+
+  const saveSchedule = async () => {
+    if (!scheduleDate) {
+      setActionError("Choose a date for the new schedule.")
+      return
+    }
+    if (scheduleStartTime >= scheduleEndTime) {
+      setActionError("The schedule end time must be later than its start time.")
+      return
+    }
+
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/availability/schedule"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({
+          doctorId: "dr-vijay-main",
+          date: scheduleDate,
+          startTime: scheduleStartTime,
+          endTime: scheduleEndTime,
+          slotDurationMinutes: Number(scheduleDuration),
+          bufferMinutes: Number(scheduleBuffer),
+          consultationTypes: [
+            { type: "IN_PERSON", feeInPaise: 100000, durationMinutes: Number(scheduleDuration) },
+            { type: "VIDEO", feeInPaise: 80000, durationMinutes: Number(scheduleDuration) },
+            { type: "FOLLOW_UP", feeInPaise: 50000, durationMinutes: Number(scheduleDuration) },
+          ],
+          isPublished: true,
+        }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || result.message || "Schedule creation failed.")
+      setSelectedDay(scheduleDate)
+      setShowScheduleForm(false)
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Schedule creation failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
+  }
 
   const handleCancel = async (id: string) => {
     setIsSavingAction(true)
@@ -533,6 +587,49 @@ function DoctorDashboardContent() {
                     </button>
                   </div>
                 </div>
+
+                {showScheduleForm && (
+                  <div className="mt-5 rounded-xl border border-gray-200 bg-soft-sky/20 p-4">
+                    <h3 className="font-semibold text-deep-trust text-sm mb-3">Create clinic schedule</h3>
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <label className="text-xs text-text-secondary">
+                        Date
+                        <input type="date" min={new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })} value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Start time
+                        <input type="time" value={scheduleStartTime} onChange={(event) => setScheduleStartTime(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        End time
+                        <input type="time" value={scheduleEndTime} onChange={(event) => setScheduleEndTime(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Slot duration
+                        <select value={scheduleDuration} onChange={(event) => setScheduleDuration(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary">
+                          <option value="15">15 minutes</option>
+                          <option value="20">20 minutes</option>
+                          <option value="30">30 minutes</option>
+                          <option value="45">45 minutes</option>
+                          <option value="60">60 minutes</option>
+                        </select>
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Buffer between slots
+                        <select value={scheduleBuffer} onChange={(event) => setScheduleBuffer(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary">
+                          <option value="0">No buffer</option>
+                          <option value="5">5 minutes</option>
+                          <option value="10">10 minutes</option>
+                          <option value="15">15 minutes</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                      <button type="button" onClick={() => setShowScheduleForm(false)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-text-secondary">Cancel</button>
+                      <button type="button" disabled={isSavingAction} onClick={() => void saveSchedule()} className="rounded-lg bg-medical-blue px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">{isSavingAction ? "Saving..." : "Publish schedule"}</button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="overflow-x-auto mt-6">
                   <table className="w-full text-sm">
