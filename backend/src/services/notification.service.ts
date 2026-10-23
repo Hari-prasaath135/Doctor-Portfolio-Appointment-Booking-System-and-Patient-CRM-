@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import { db, collections, admin } from '../config/firebase';
 import { Notification, NotificationType } from '../types';
-import { NotFoundError } from '../utils/errors';
+import { NotFoundError, ForbiddenError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
 
@@ -207,11 +207,16 @@ export class NotificationService {
   /**
    * Mark a notification as read.
    */
-  async markAsRead(id: string): Promise<void> {
+  async markAsRead(id: string, userId: string): Promise<void> {
     const ref = db.collection(collections.notifications).doc(id);
+    const snap = await ref.get();
 
-    if (!(await ref.get()).exists) {
+    if (!snap.exists) {
       throw new NotFoundError('Notification');
+    }
+
+    if (snap.data()?.userId !== userId) {
+      throw new ForbiddenError('You can only mark your own notifications as read');
     }
 
     await ref.update({ isRead: true });
