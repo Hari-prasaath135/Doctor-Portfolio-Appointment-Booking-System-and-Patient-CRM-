@@ -2,6 +2,7 @@ import { db, collections, admin } from '../config/firebase';
 import { Availability, TimeSlot, CreateScheduleInput, MarkLeaveInput } from '../types';
 import { NotFoundError, ConflictError } from '../utils/errors';
 import { v4 as uuid } from 'uuid';
+import { minutesToTime, timeToMinutes } from '../utils/time';
 
 export class AvailabilityService {
   /**
