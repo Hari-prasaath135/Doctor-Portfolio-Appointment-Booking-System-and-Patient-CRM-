@@ -209,15 +209,8 @@ export class PaymentService {
       throw new ForbiddenError('You can only verify payments for your own appointments');
     }
 
-    // If appointment is already confirmed (e.g. webhook processed it first)
-    if (appt.status === 'CONFIRMED') {
-      return {
-        status: 'CONFIRMED',
-        appointmentId: input.appointmentId,
-        paymentId: input.razorpayPaymentId,
-        message: 'Appointment is already confirmed',
-      };
-    }
+    // Even if a webhook confirmed the appointment first, still validate this
+    // checkout response against the stored order and Razorpay before returning success.
 
     // 2. Load payment record
     const paymentSnap = await db
