@@ -7,7 +7,7 @@
 
 ## Executive summary
 
-The original CI baseline passed on commit `9eb073fb3f33f96f022bdee32b63e71c6c572d59`. On code commit `72ef9aed5fbf2d7715383f05fd7f1dd1cdcaae54`, the backend build and all **33 unit tests passed**. Frontend lint and production-build checks were still running when this report was last refreshed.
+The original CI baseline passed on commit `9eb073fb3f33f96f022bdee32b63e71c6c572d59`. On code commit `72ef9aed5fbf2d7715383f05fd7f1dd1cdcaae54`, the backend build and all **33 unit tests passed**, and frontend lint passed. The production-build step on that run was superseded before completion; a production build had passed on `9eb073f`, and frontend source files have not changed since that passing build. The latest branch-head CI is pending after the report update.
 
 **Runtime integrations are not fully verified.** A successful build/unit suite does not prove Firebase, Razorpay, SMTP, or dashboard flows work end to end.
 
@@ -19,7 +19,9 @@ The original CI baseline passed on commit `9eb073fb3f33f96f022bdee32b63e71c6c572
 | Next.js production build and TypeScript check | PASS on commit `9eb073f` | All configured app routes compiled |
 | Backend TypeScript build | PASS on commit `9eb073f` | Included in backend test job |
 | Backend unit tests | PASS on commit `72ef9ae` | 33 passed, 0 failed |
-| Frontend lint and production build | IN PROGRESS on commit `72ef9ae` | [Current workflow](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions/runs/39908152094) |
+| Frontend ESLint | PASS on commit `72ef9ae` | 0 errors; warnings remain |
+| Next.js production build | PASS on commit `9eb073f` | Frontend source has not changed since this pass; latest-head rerun pending |
+| Latest branch-head CI | PENDING | [GitHub Actions](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions) |
 | Firebase/payment/email/dashboard integration | NOT RUN | Requires a dedicated test environment; see matrix below |
 
 The 143 frontend lint warnings are non-blocking under the current configuration but remain cleanup work. A green build does not prove runtime integrations work.
