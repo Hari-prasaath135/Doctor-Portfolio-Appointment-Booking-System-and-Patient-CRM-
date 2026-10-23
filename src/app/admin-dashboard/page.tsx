@@ -39,6 +39,7 @@ import { collection, query, orderBy, onSnapshot, doc, updateDoc, Timestamp } fro
 import ProtectedRoute from "@/components/auth/ProtectedRoute"
 import { useAuth } from "@/lib/auth-context"
 import { doctorInfo } from "@/lib/data"
+import { apiUrl } from "@/lib/api"
 import { Loader2 } from "lucide-react"
 
 // ---------- Helpers ----------
@@ -199,7 +200,7 @@ function AdminDashboardContent() {
       const token = await getIdToken()
       if (!token) return
 
-      const res = await fetch("http://localhost:5000/api/v1/admin/insights", {
+      const res = await fetch(apiUrl("/admin/insights"), {
         headers: {
           Authorization: `Bearer ${token}`,
         },
@@ -307,7 +308,7 @@ function AdminDashboardContent() {
   const loadSlotsForDate = async (dateStr: string) => {
     if (!dateStr) return
     try {
-      const res = await fetch(`http://localhost:5000/api/v1/availability/slots?doctorId=${doctorInfo.id}&date=${dateStr}`)
+      const res = await fetch(apiUrl("/availability/slots?doctorId=" + encodeURIComponent(doctorInfo.id) + "&date=" + encodeURIComponent(dateStr)))
       if (res.ok) {
         const json = await res.json()
         const data = json.data
@@ -353,7 +354,7 @@ function AdminDashboardContent() {
 
       const token = await getIdToken()
 
-      const res = await fetch("http://localhost:5000/api/v1/availability/schedule", {
+      const res = await fetch(apiUrl("/availability/schedule"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
