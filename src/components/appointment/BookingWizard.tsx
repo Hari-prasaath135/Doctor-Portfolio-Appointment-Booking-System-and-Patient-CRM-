@@ -127,6 +127,8 @@ export default function BookingWizard() {
   const [loadingSlots, setLoadingSlots] = useState(false)
   const [availabilityError, setAvailabilityError] = useState<string | null>(null)
   const [slotsError, setSlotsError] = useState<string | null>(null)
+  const [availabilityRetry, setAvailabilityRetry] = useState(0)
+  const [slotsRetry, setSlotsRetry] = useState(0)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isOpeningCheckout, setIsOpeningCheckout] = useState(false)
@@ -186,7 +188,7 @@ export default function BookingWizard() {
     return () => {
       cancelled = true
     }
-  }, [booking.date])
+  }, [booking.date, availabilityRetry])
 
   // Fetch slots for selected date from Phase 1 API
   useEffect(() => {
@@ -233,7 +235,7 @@ export default function BookingWizard() {
     return () => {
       cancelled = true
     }
-  }, [booking.date])
+  }, [booking.date, slotsRetry])
 
   // Calculate age from Date of Birth
   const handleDobChange = (dobStr: string) => {
@@ -713,6 +715,11 @@ export default function BookingWizard() {
                   ) : availableDates.length === 0 ? (
                     <p className="text-xs text-amber-600 bg-amber-50 p-3 rounded-xl">
                       {availabilityError || "No published dates available at this time. Please check back soon."}
+                      {availabilityError && (
+                        <button type="button" onClick={() => setAvailabilityRetry((value) => value + 1)} className="ml-2 underline font-semibold">
+                          Try again
+                        </button>
+                      )}
                     </p>
                   ) : (
                     <div className="flex gap-2 overflow-x-auto pb-2 -mx-1 px-1">
@@ -759,6 +766,11 @@ export default function BookingWizard() {
                   ) : slots.length === 0 ? (
                     <p className="text-xs text-text-secondary py-4 text-center">
                       {slotsError || "No slots available for this date."}
+                      {slotsError && (
+                        <button type="button" onClick={() => setSlotsRetry((value) => value + 1)} className="ml-2 underline font-semibold">
+                          Try again
+                        </button>
+                      )}
                     </p>
                   ) : (
                     <div className="grid grid-cols-3 sm:grid-cols-4 gap-2.5">
