@@ -93,3 +93,9 @@ Some frontend API routes currently contain in-memory demo data. In-memory record
 ## Frontend API configuration
 
 The booking wizard calls the Express backend through `NEXT_PUBLIC_API_BASE_URL`. Copy the root `.env.example` to `.env.local` for local configuration. For local development, the API helper defaults to `http://localhost:5000/api/v1`; for production, configure the deployed HTTPS backend base URL including `/api/v1` before running `next build` or deploying. Next.js embeds `NEXT_PUBLIC_*` values into the browser bundle at build time, so changing this value requires a rebuild. Never place private credentials in a `NEXT_PUBLIC_*` variable.
+
+## Backend identity and email delivery
+
+For this single-doctor deployment, configure `DOCTOR_ID=dr-vijay-main` in the backend environment so the doctor's authenticated account maps to the same ID used by availability schedules. A verified Firebase custom claim named `doctorId` takes precedence when configured. Doctor appointment reads and schedule changes are scoped to this resolved identity.
+
+Appointment confirmation emails use Nodemailer with Gmail SMTP. Configure `EMAIL_USER`, a Gmail App Password in `EMAIL_PASSWORD`, and `EMAIL_FROM` / `EMAIL_FROM_NAME` using the backend `.env.example`. Missing credentials or send failures are recorded as outbox failures and retried; the UI must not claim that an email was delivered merely because payment succeeded.
