@@ -3,7 +3,7 @@ import { AuthenticatedRequest } from '../types';
 import { paymentService } from '../services/payment.service';
 import { appointmentService } from '../services/appointment.service';
 import { sendSuccess, sendCreated } from '../utils/response';
-import { UnauthorizedError, ForbiddenError, BadRequestError } from '../utils/errors';
+import { UnauthorizedError, BadRequestError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { assertAppointmentAccess } from '../utils/appointment-access';
 
@@ -150,12 +150,7 @@ export class PaymentController {
       const id = String(req.params.id);
       const appt = await appointmentService.getAppointmentById(id);
 
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      if (userRole === 'PATIENT' && appt.patientId !== userId) {
-        throw new ForbiddenError('You can only view your own appointments');
-      }
+      assertAppointmentAccess(req.user, appt);
 
       sendSuccess(res, {
         id: appt.id,
