@@ -58,6 +58,9 @@ export class AppointmentController {
         req.query as Record<string, string>;
 
       const role = req.user['role'];
+      if (!['ADMIN', 'DOCTOR', 'PATIENT'].includes(String(role))) {
+        throw new ForbiddenError('Your account does not have a supported appointment role');
+      }
 
       const result = await appointmentService.listAppointments({
         page: parseInt(page),
@@ -86,16 +89,7 @@ export class AppointmentController {
       const id = String(req.params.id);
       const appointment = await appointmentService.getAppointmentById(id);
 
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      // Patients can only view their own appointments; doctors can only view appointments assigned to them; admins can view all.
-      if (userRole === 'PATIENT' && appointment.patientId !== userId) {
-        throw new ForbiddenError('You can only view your own appointment records');
-      }
-      if (userRole === 'DOCTOR' && appointment.doctorId !== resolveDoctorId(req.user)) {
-        throw new ForbiddenError('You can only view appointments assigned to you');
-      }
+      assertAppointmentAccess(req.user, appointment);
 
       sendSuccess(res, appointment);
     } catch (err) {
