@@ -7,7 +7,7 @@
 
 ## Executive summary
 
-On code commit `a66346fceafaf7e229ff9b1a35ce910a8936efa3`, the latest complete CI run passed: frontend lint, Next.js production build, backend TypeScript build, and **45 backend unit tests passed with 0 failures**. The report-only update that follows will trigger a fresh CI run for the final documentation commit.
+On branch head `22de871c8aa84676261fc3426f22297056f11a54`, the latest complete CI run passed: frontend lint, Next.js production build, backend TypeScript build, and **54 backend unit tests passed with 0 failures**.
 
 **Runtime integrations are not fully verified.** A successful build/unit suite does not prove Firebase, Razorpay, SMTP, or dashboard flows work end to end.
 
@@ -15,11 +15,11 @@ On code commit `a66346fceafaf7e229ff9b1a35ce910a8936efa3`, the latest complete C
 
 | Check | Latest confirmed result | Evidence / scope |
 |---|---|---|
-| Frontend ESLint | PASS on commit `a66346f` | 0 lint errors; warnings remain |
-| Next.js production build and TypeScript check | PASS on commit `a66346f` | All configured app routes compiled |
-| Backend TypeScript build | PASS on commit `a66346f` | Included in backend test job |
-| Backend unit tests | PASS on commit `a66346f` | 45 passed, 0 failed |
-| Latest complete CI | PASS | [GitHub Actions run](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions/runs/39910210336) |
+| Frontend ESLint | PASS on `22de871` | 0 errors; 143 warnings remain |
+| Next.js production build and TypeScript check | PASS on `22de871` | All configured app routes compiled |
+| Backend TypeScript build | PASS on `22de871` | Included in backend test job |
+| Backend unit tests | PASS on `22de871` | 54 passed, 0 failed |
+| Latest complete CI | PASS | [GitHub Actions run](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions/runs/39912800217) |
 | Firebase/payment/email/dashboard integration | NOT RUN | Requires a dedicated test environment; see matrix below |
 
 The 143 frontend lint warnings are non-blocking under the current configuration but remain cleanup work. A green build does not prove runtime integrations work.
@@ -51,7 +51,31 @@ The backend Node test suite currently contains the following groups:
 - Doctor identity resolution.
 - Appointment record access: owning patient, foreign patient denied, assigned doctor, mismatched doctor denied, administrator, unknown role denied, missing authentication denied.
 
-The latest backend CI run executed **45 unit tests: 45 passed, 0 failed**. Added coverage includes constant-time signature comparison (matching, mismatched, malformed, empty, and real HMAC digests) and webhook claim decisions (completed-event deduplication, active lease, expired lease, failed-event retry, first processing, and invalid lease values).
+The latest backend CI run executed **54 unit tests: 54 passed, 0 failed**. Coverage includes constant-time signature comparison; webhook claim decisions; payment amount/currency validation; and notification ownership authorization.
+
+## Work tracker and next-step plan
+
+The goal is to produce an evidence-backed quality report and verify critical workflows in an isolated test environment. Do not add another test that duplicates an already-covered pure helper; new work should close a named gap below.
+
+| Workstream | State | Exit criterion |
+|---|---|---|
+| CI baseline: frontend lint/build and backend build/unit suite | COMPLETE | Current branch-head CI passes |
+| Unit tests: errors/responses, role middleware, time/identity, appointment access, signature handling, webhook claim decisions, payment payload validation, notification ownership | COMPLETE | 54 tests pass, 0 fail |
+| Frontend lint debt | OPEN, non-blocking | Prioritize correctness/accessibility warnings; do not mass-suppress warnings |
+| Appointment/availability integration | NEXT | Isolated tests prove one winner for concurrent slot booking, valid published slots only, cancellation releases slot, and reschedule updates old/new slots atomically |
+| Payment/webhook integration | AFTER appointment integration | Mocked/provider-test scenarios prove invalid signature rejection, amount/currency mismatch reconciliation, replay idempotency, failed-event retry, and no double confirmation/notification |
+| Email/outbox integration | AFTER payment flow | Simulated SMTP failure is observable/retriable; successful confirmation sends to the patient; checkout UI always exits processing state |
+| Admin/doctor dashboard consistency | AFTER persisted lifecycle tests | Create/update/cancel a test appointment and assert both dashboards read the same persisted state |
+| Final regression and report | LAST | Run full CI once after the batch of fixes; update the evidence table with commit SHA and exact results |
+
+### Execution rules to prevent repeated work
+
+1. Read the current branch, report, and CI evidence before changing code.
+2. Work on one coherent workstream at a time; batch related edits and tests into a small number of commits.
+3. Do not rerun or recreate already-passing pure unit tests without a new defect or uncovered branch.
+4. Prefer deterministic tests with mocked Firestore/provider adapters; never use production Firebase, live payments, or real patient data.
+5. Run targeted tests during a workstream, then run the full CI once after the batch.
+6. Mark a row complete only when its exit criterion is backed by a passing test or linked CI result. Keep runtime integrations marked pending until actually exercised.
 
 ## End-to-end and integration tests still required
 
@@ -79,4 +103,4 @@ These have **not** been proven by the isolated unit tests or build checks. Run t
 
 ## Current decision
 
-**Testing only — no deployment, no merge, and no production changes.** Keep all fixes on `chore/ci-and-repo-hardening` and keep PR #1 open until the test report's pending checks are resolved.
+**Testing only — no deployment, no merge, and no production changes.** Current baseline is green at 54 backend unit tests, frontend lint, and frontend production build. Next work is appointment/availability integration, not another round of the same unit tests. Keep all fixes on `chore/ci-and-repo-hardening` and keep PR #1 open until the remaining critical integration checks have evidence.
