@@ -9,6 +9,7 @@ import {
   onAuthStateChanged,
 } from "firebase/auth"
 import { auth } from "@/lib/firebase-client"
+import { apiUrl } from "@/lib/api"
 
 export interface AuthContextType {
   user: User | null
@@ -34,7 +35,6 @@ const AuthContext = createContext<AuthContextType>({
   getIdToken: async () => null,
 })
 
-const API_BASE_URL = "http://localhost:5000/api/v1"
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -50,7 +50,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (firebaseUser) {
         try {
           const idToken = await firebaseUser.getIdToken()
-          const res = await fetch(`${API_BASE_URL}/auth/verify`, {
+          const res = await fetch(apiUrl("/auth/verify"), {
             method: "POST",
             headers: {
               Authorization: `Bearer ${idToken}`,
@@ -105,7 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       let authoritativeRole = "PATIENT"
       const idToken = await signedInUser.getIdToken()
       try {
-        const res = await fetch(`${API_BASE_URL}/auth/verify`, {
+        const res = await fetch(apiUrl("/auth/verify"), {
           method: "POST",
           headers: {
             Authorization: `Bearer ${idToken}`,

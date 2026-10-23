@@ -5,12 +5,24 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
-  // Override default ignores of eslint-config-next.
+  {
+    rules: {
+      // Keep existing any-usage visible as a warning while CI continues
+      // to enforce a production build. Reduce this debt incrementally.
+      "@typescript-eslint/no-explicit-any": "warn",
+      // Existing UI effects are being refactored incrementally; keep these visible
+      // as warnings so lint can still report unrelated regressions.
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/preserve-manual-memoization": "warn",
+      "react/no-unescaped-entities": "warn",
+    },
+  },
   globalIgnores([
-    // Default ignores of eslint-config-next:
     ".next/**",
     "out/**",
     "build/**",
+    "dist/**",
+    "backend/test/**",
     "next-env.d.ts",
   ]),
 ]);

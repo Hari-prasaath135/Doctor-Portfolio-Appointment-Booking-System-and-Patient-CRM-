@@ -10,6 +10,7 @@ import {
 import { NotFoundError, ConflictError, ForbiddenError } from '../utils/errors';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
+import { canReleaseAppointmentSlot } from '../utils/appointment-slot';
 
 export class AppointmentService {
   /**
@@ -55,7 +56,7 @@ export class AppointmentService {
     const matchedType = consultationTypes.find(
       (c: { type: string; feeInPaise: number }) => c.type === input.consultationType
     );
-    const authoritativeFee = matchedType ? matchedType.feeInPaise : (input.consultationType === 'VIDEO' ? 80000 : 100000);
+    let authoritativeFee = matchedType ? matchedType.feeInPaise : (input.consultationType === 'VIDEO' ? 80000 : 100000);
 
     // Calculate age if date of birth is provided
     let calculatedAge = input.age;
@@ -75,7 +76,27 @@ export class AppointmentService {
 
     await db.runTransaction(async (tx) => {
       const latestAvailability = await tx.get(availabilityRef);
-      const slots = latestAvailability.data()?.slots || [];
+      const latestAvailabilityData = latestAvailability.data();
+
+      // Revalidate schedule state inside the transaction. The schedule may have
+      // been unpublished or marked as leave after the initial query above.
+      if (!latestAvailabilityData || latestAvailabilityData.isLeave) {
+        throw new ConflictError(`Doctor is unavailable on ${date}`);
+      }
+      if (latestAvailabilityData.isPublished === false) {
+        throw new ConflictError(`Consultation schedule for ${date} is not published`);
+      }
+
+      // Use the current schedule's fee, not a stale pre-transaction snapshot.
+      const latestConsultationTypes = latestAvailabilityData.consultationTypes || [];
+      const latestMatchedType = latestConsultationTypes.find(
+        (c: { type: string; feeInPaise: number }) => c.type === input.consultationType
+      );
+      authoritativeFee = latestMatchedType
+        ? latestMatchedType.feeInPaise
+        : (input.consultationType === 'VIDEO' ? 80000 : 100000);
+
+      const slots = latestAvailabilityData.slots || [];
 
       const slotIndex = slots.findIndex(
         (s: { time: string; isBooked: boolean; status?: string; reservedUntil?: string | null }) => s.time === time
@@ -86,15 +107,49 @@ export class AppointmentService {
       }
 
       const slot = slots[slotIndex];
-      const isReservedAndActive = slot.status === 'RESERVED' && slot.reservedUntil && new Date(slot.reservedUntil) > new Date();
+      const currentTime = new Date();
+      const reservationExpired =
+        slot.status === 'RESERVED' &&
+        Boolean(slot.reservedUntil) &&
+        new Date(slot.reservedUntil as string) <= currentTime;
+      const isReservedAndActive =
+        slot.status === 'RESERVED' &&
+        Boolean(slot.reservedUntil) &&
+        new Date(slot.reservedUntil as string) > currentTime;
 
-      if (slot.isBooked || slot.status === 'BLOCKED' || slot.status === 'BOOKED' || isReservedAndActive) {
+      if (
+        (slot.isBooked && !reservationExpired) ||
+        slot.status === 'BLOCKED' ||
+        slot.status === 'BOOKED' ||
+        isReservedAndActive
+      ) {
         throw new ConflictError(
           `The ${time} slot on ${date} is already booked or reserved. Please choose a different time.`
         );
       }
 
-      // Mark slot as reserved for 15 minutes pending mock payment
+      // Expired holds are released atomically when another patient claims the slot,
+      // so the booking flow does not depend on a separate cleanup call.
+      if (reservationExpired && slot.appointmentId && slot.appointmentId !== id) {
+        const expiredAppointmentRef = db.collection(collections.appointments).doc(slot.appointmentId);
+        const expiredAppointmentSnap = await tx.get(expiredAppointmentRef);
+        if (expiredAppointmentSnap.exists) {
+          const expiredAppointment = expiredAppointmentSnap.data();
+          if (
+            expiredAppointment &&
+            ['PENDING', 'RESCHEDULED'].includes(expiredAppointment.status) &&
+            !expiredAppointment.paymentId
+          ) {
+            tx.update(expiredAppointmentRef, {
+              status: 'CANCELLED',
+              cancelReason: 'Reservation expired before payment completion',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      // Mark slot as reserved for 15 minutes pending payment
       const reservationExpiry = new Date(Date.now() + 15 * 60 * 1000).toISOString();
       slots[slotIndex].isBooked = true;
       slots[slotIndex].status = 'RESERVED';
@@ -214,39 +269,87 @@ export class AppointmentService {
    * Cancel appointment and release the slot.
    */
   async cancelAppointment(id: string, reason: string): Promise<Appointment> {
-    const appointment = await this.getAppointmentById(id);
+    const appointmentRef = db.collection(collections.appointments).doc(id);
+    let result: Appointment | undefined;
 
-    if (appointment.status === 'COMPLETED') {
-      throw new ForbiddenError('Cannot cancel a completed appointment');
-    }
+    // Keep appointment state and slot release in one transaction. Separate
+    // writes can otherwise leave a cancelled appointment occupying a slot or
+    // release a slot while the appointment remains active.
+    await db.runTransaction(async (tx) => {
+      const appointmentSnap = await tx.get(appointmentRef);
+      if (!appointmentSnap.exists) throw new NotFoundError('Appointment');
 
-    // Release the availability slot
-    const availabilitySnap = await db
-      .collection(collections.availability)
-      .where('doctorId', '==', appointment.doctorId)
-      .where('date', '==', appointment.date)
-      .limit(1)
-      .get();
+      const appointment = {
+        id: appointmentSnap.id,
+        ...appointmentSnap.data(),
+      } as Appointment;
 
-    if (!availabilitySnap.empty) {
-      const availRef = availabilitySnap.docs[0].ref;
-      const slots = availabilitySnap.docs[0].data().slots || [];
-      const idx = slots.findIndex(
-        (s: { time: string; isBooked: boolean }) => s.time === appointment.time
-      );
-      if (idx !== -1) {
-        slots[idx].isBooked = false;
-        await availRef.update({
-          slots,
+      if (appointment.status === 'COMPLETED') {
+        throw new ForbiddenError('Cannot cancel a completed appointment');
+      }
+
+      const availabilityQuery = db
+        .collection(collections.availability)
+        .where('doctorId', '==', appointment.doctorId)
+        .where('date', '==', appointment.date)
+        .limit(1);
+      const availabilitySnap = await tx.get(availabilityQuery);
+
+      let shouldUpdateAppointment = appointment.status !== 'CANCELLED';
+      if (!availabilitySnap.empty) {
+        const availabilityDoc = availabilitySnap.docs[0];
+        const availabilityData = availabilityDoc.data();
+        const slots = [...(availabilityData.slots || [])];
+        const slotIndex = slots.findIndex(
+          (slot: { time: string; appointmentId?: string | null; reservedBy?: string | null }) =>
+            slot.time === appointment.time
+        );
+
+        if (slotIndex !== -1) {
+          const slot = slots[slotIndex];
+          // Do not free a slot that has since been assigned to a different
+          // appointment or patient.
+          if (canReleaseAppointmentSlot(slot, id, appointment.patientId)) {
+            slots[slotIndex] = {
+              ...slot,
+              isBooked: false,
+              status: 'AVAILABLE',
+            };
+            delete slots[slotIndex].appointmentId;
+            delete slots[slotIndex].reservedUntil;
+            delete slots[slotIndex].reservedBy;
+
+            tx.update(availabilityDoc.ref, {
+              slots,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      if (shouldUpdateAppointment) {
+        const cancelledAt = admin.firestore.Timestamp.now();
+        tx.update(appointmentRef, {
+          status: 'CANCELLED',
+          cancelReason: reason,
+          cancelledAt,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
+        result = {
+          ...appointment,
+          status: 'CANCELLED',
+          cancelReason: reason,
+          cancelledAt,
+        };
+      } else {
+        // Idempotent retry: reconcile a stale slot if it still belongs to this
+        // appointment, without overwriting the original cancellation metadata.
+        result = appointment;
       }
-    }
-
-    return this.updateStatus(id, 'CANCELLED', {
-      cancelReason: reason,
-      cancelledAt: admin.firestore.Timestamp.now(),
     });
+
+    if (!result) throw new Error('Cancellation transaction completed without an appointment result');
+    return result;
   }
 
   /**
@@ -263,8 +366,10 @@ export class AppointmentService {
     }
 
     const { newDate, newTime } = input;
+    if (newDate === appointment.date && newTime === appointment.time) {
+      throw new ConflictError('Choose a different date or time to reschedule');
+    }
 
-    // Find new availability
     const newAvailSnap = await db
       .collection(collections.availability)
       .where('doctorId', '==', appointment.doctorId)
@@ -276,55 +381,129 @@ export class AppointmentService {
       throw new ConflictError(`No availability for the requested date ${newDate}`);
     }
 
-    const newAvailRef = newAvailSnap.docs[0].ref;
-    const appointmentRef = db.collection(collections.appointments).doc(id);
+    const newAvailabilityDoc = newAvailSnap.docs[0];
+    const newAvailabilityData = newAvailabilityDoc.data();
+    if (newAvailabilityData.isLeave || newAvailabilityData.isPublished === false) {
+      throw new ConflictError('The requested schedule is not available for booking');
+    }
 
-    // Old availability
+    const newAvailRef = newAvailabilityDoc.ref;
+    const appointmentRef = db.collection(collections.appointments).doc(id);
     const oldAvailSnap = await db
       .collection(collections.availability)
       .where('doctorId', '==', appointment.doctorId)
       .where('date', '==', appointment.date)
       .limit(1)
       .get();
+    const oldAvailRef = oldAvailSnap.empty ? null : oldAvailSnap.docs[0].ref;
+    const sameAvailability = oldAvailRef?.path === newAvailRef.path;
 
     await db.runTransaction(async (tx) => {
-      // Release old slot
-      if (!oldAvailSnap.empty) {
-        const latestOld = await tx.get(oldAvailSnap.docs[0].ref);
-        const oldSlots = latestOld.data()?.slots || [];
-        const oldIdx = oldSlots.findIndex(
-          (s: { time: string; isBooked: boolean }) => s.time === appointment.time
-        );
-        if (oldIdx !== -1) {
-          oldSlots[oldIdx].isBooked = false;
-          tx.update(oldAvailSnap.docs[0].ref, {
+      // Read all relevant documents before any writes. When both slots are on
+      // the same date, update one shared slot array to avoid overwriting a release.
+      const latestNew = await tx.get(newAvailRef);
+      const latestOld = oldAvailRef && !sameAvailability
+        ? await tx.get(oldAvailRef)
+        : latestNew;
+
+      const newSlots = latestNew.data()?.slots || [];
+      const oldSlots = latestOld.data()?.slots || [];
+      const oldIdx = oldSlots.findIndex(
+        (slot: { time: string; appointmentId?: string }) =>
+          slot.time === appointment.time &&
+          (!slot.appointmentId || slot.appointmentId === id)
+      );
+      const newIdx = newSlots.findIndex(
+        (slot: { time: string }) => slot.time === newTime
+      );
+
+      if (newIdx === -1) throw new NotFoundError(`Slot ${newTime}`);
+
+      const targetSlot = newSlots[newIdx];
+      const now = new Date();
+      const targetReservationExpired =
+        targetSlot.status === 'RESERVED' &&
+        Boolean(targetSlot.reservedUntil) &&
+        new Date(targetSlot.reservedUntil as string) <= now;
+      const reservationActive =
+        targetSlot.status === 'RESERVED' &&
+        Boolean(targetSlot.reservedUntil) &&
+        new Date(targetSlot.reservedUntil as string) > now;
+      const targetIsOldSlot = sameAvailability && oldIdx === newIdx;
+      if (
+        !targetIsOldSlot &&
+        ((targetSlot.isBooked && !targetReservationExpired) ||
+          targetSlot.status === 'BOOKED' ||
+          targetSlot.status === 'BLOCKED' ||
+          reservationActive)
+      ) {
+        throw new ConflictError(`Slot ${newTime} on ${newDate} is already booked or reserved`);
+      }
+
+      if (
+        targetReservationExpired &&
+        targetSlot.appointmentId &&
+        targetSlot.appointmentId !== id
+      ) {
+        const expiredAppointmentRef = db.collection(collections.appointments).doc(targetSlot.appointmentId);
+        const expiredAppointmentSnap = await tx.get(expiredAppointmentRef);
+        if (expiredAppointmentSnap.exists) {
+          const expiredAppointment = expiredAppointmentSnap.data();
+          if (
+            expiredAppointment &&
+            ['PENDING', 'RESCHEDULED'].includes(expiredAppointment.status) &&
+            !expiredAppointment.paymentId
+          ) {
+            tx.update(expiredAppointmentRef, {
+              status: 'CANCELLED',
+              cancelReason: 'Reservation expired before payment completion',
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      if (oldIdx !== -1) {
+        oldSlots[oldIdx].isBooked = false;
+        oldSlots[oldIdx].status = 'AVAILABLE';
+        delete oldSlots[oldIdx].appointmentId;
+        delete oldSlots[oldIdx].reservedUntil;
+        delete oldSlots[oldIdx].reservedBy;
+      }
+
+      const isConfirmed = appointment.status === 'CONFIRMED';
+      newSlots[newIdx].isBooked = true;
+      newSlots[newIdx].status = isConfirmed ? 'BOOKED' : 'RESERVED';
+      newSlots[newIdx].appointmentId = id;
+      newSlots[newIdx].reservedBy = appointment.patientId;
+      if (isConfirmed) {
+        delete newSlots[newIdx].reservedUntil;
+      } else {
+        newSlots[newIdx].reservedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      }
+
+      if (sameAvailability) {
+        tx.update(newAvailRef, {
+          slots: newSlots,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } else {
+        if (oldAvailRef && oldIdx !== -1) {
+          tx.update(oldAvailRef, {
             slots: oldSlots,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
         }
+        tx.update(newAvailRef, {
+          slots: newSlots,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
-
-      // Claim new slot
-      const latestNew = await tx.get(newAvailRef);
-      const newSlots = latestNew.data()?.slots || [];
-      const newIdx = newSlots.findIndex(
-        (s: { time: string; isBooked: boolean }) => s.time === newTime
-      );
-
-      if (newIdx === -1) throw new NotFoundError(`Slot ${newTime}`);
-      if (newSlots[newIdx].isBooked)
-        throw new ConflictError(`Slot ${newTime} on ${newDate} is already booked`);
-
-      newSlots[newIdx].isBooked = true;
-      tx.update(newAvailRef, {
-        slots: newSlots,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
 
       tx.update(appointmentRef, {
         date: newDate,
         time: newTime,
-        status: 'RESCHEDULED',
+        status: isConfirmed ? 'CONFIRMED' : 'RESCHEDULED',
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
@@ -435,12 +614,37 @@ export class AppointmentService {
 
       const slot = slots[slotIndex];
 
-      // Validate slot reservation
-      // If already booked by someone else or another appointment
-      if (slot.status === 'BOOKED' && slot.appointmentId && slot.appointmentId !== appointmentId) {
+      // Validate that the slot is still reserved for this exact appointment.
+      // A different reservation (not just a completed booking) must never be
+      // overwritten by a late payment callback.
+      if (slot.status === 'BLOCKED') {
         outcome = {
           status: 'RECONCILIATION_REQUIRED',
-          reason: `Slot was reassigned or booked by another appointment (${slot.appointmentId})`,
+          reason: 'The appointment slot has been blocked',
+        };
+        return;
+      }
+
+      if (
+        slot.appointmentId &&
+        slot.appointmentId !== appointmentId &&
+        (slot.isBooked || slot.status === 'BOOKED' || slot.status === 'RESERVED')
+      ) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: `Slot was reassigned to another appointment (${slot.appointmentId})`,
+        };
+        return;
+      }
+
+      if (
+        slot.status === 'RESERVED' &&
+        slot.reservedUntil &&
+        new Date(slot.reservedUntil) <= new Date()
+      ) {
+        outcome = {
+          status: 'RECONCILIATION_REQUIRED',
+          reason: 'The slot reservation expired before payment confirmation',
         };
         return;
       }
@@ -521,7 +725,7 @@ export class AppointmentService {
             const apptSnap = await db.collection(collections.appointments).doc(slot.appointmentId).get();
             if (apptSnap.exists) {
               const appt = apptSnap.data();
-              if (appt?.status === 'PENDING') {
+              if (appt && ['PENDING', 'RESCHEDULED'].includes(appt.status) && !appt.paymentId) {
                 await apptSnap.ref.update({
                   status: 'CANCELLED',
                   cancelReason: 'Reservation expired before payment completion',

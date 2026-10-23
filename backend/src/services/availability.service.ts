@@ -2,6 +2,7 @@ import { db, collections, admin } from '../config/firebase';
 import { Availability, TimeSlot, CreateScheduleInput, MarkLeaveInput } from '../types';
 import { NotFoundError, ConflictError } from '../utils/errors';
 import { v4 as uuid } from 'uuid';
+import { minutesToTime, timeToMinutes } from '../utils/time';
 
 export class AvailabilityService {
   /**
@@ -39,8 +40,8 @@ export class AvailabilityService {
       isPublished = true,
     } = input;
 
-    const startMinutes = this.timeToMinutes(startTime);
-    const endMinutes = this.timeToMinutes(endTime);
+    const startMinutes = timeToMinutes(startTime);
+    const endMinutes = timeToMinutes(endTime);
 
     if (startMinutes >= endMinutes) {
       throw new ConflictError('Start time must be strictly before end time');
@@ -58,8 +59,8 @@ export class AvailabilityService {
     const generatedSlots: TimeSlot[] = [];
     let current = startMinutes;
     while (current + slotDurationMinutes <= endMinutes) {
-      const slotStartTime = this.minutesToTime(current);
-      const slotEndTime = this.minutesToTime(current + slotDurationMinutes);
+      const slotStartTime = minutesToTime(current);
+      const slotEndTime = minutesToTime(current + slotDurationMinutes);
       generatedSlots.push({
         time: slotStartTime,
         endTime: slotEndTime,
@@ -110,7 +111,7 @@ export class AvailabilityService {
     }
 
     // Sort slots chronologically
-    generatedSlots.sort((a, b) => this.timeToMinutes(a.time) - this.timeToMinutes(b.time));
+    generatedSlots.sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
 
     const now = admin.firestore.FieldValue.serverTimestamp();
 

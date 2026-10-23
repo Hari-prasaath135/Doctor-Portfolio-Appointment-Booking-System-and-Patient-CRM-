@@ -13,6 +13,9 @@ import { v4 as uuid } from 'uuid';
 import { getRazorpayConfig, getRazorpayClient } from '../config/razorpay';
 import { appointmentService } from './appointment.service';
 import { notificationService } from './notification.service';
+import { safeCompareHexSignature } from '../utils/signatures';
+import { decideWebhookClaim } from '../utils/webhook-claim';
+import { isCapturedPaymentConsistent } from '../utils/payment-validation';
 
 export interface CreateRazorpayOrderInput {
   appointmentId: string;
@@ -207,15 +210,8 @@ export class PaymentService {
       throw new ForbiddenError('You can only verify payments for your own appointments');
     }
 
-    // If appointment is already confirmed (e.g. webhook processed it first)
-    if (appt.status === 'CONFIRMED') {
-      return {
-        status: 'CONFIRMED',
-        appointmentId: input.appointmentId,
-        paymentId: input.razorpayPaymentId,
-        message: 'Appointment is already confirmed',
-      };
-    }
+    // Even if a webhook confirmed the appointment first, still validate this
+    // checkout response against the stored order and Razorpay before returning success.
 
     // 2. Load payment record
     const paymentSnap = await db
@@ -239,7 +235,7 @@ export class PaymentService {
       .update(payload)
       .digest('hex');
 
-    if (expectedSignature !== input.razorpaySignature) {
+    if (!safeCompareHexSignature(expectedSignature, input.razorpaySignature)) {
       logger.warn(`Signature mismatch for order ${input.razorpayOrderId}`);
       await paymentDoc.ref.update({
         status: 'FAILED',
@@ -365,7 +361,7 @@ export class PaymentService {
       .update(rawBody)
       .digest('hex');
 
-    if (expectedSignature !== signature) {
+    if (!safeCompareHexSignature(expectedSignature, signature)) {
       logger.warn('Razorpay webhook signature verification failed');
       throw new BadRequestError('Invalid webhook signature');
     }
@@ -377,21 +373,42 @@ export class PaymentService {
       throw new BadRequestError('Missing webhook event ID');
     }
 
-    // 2. Durable Deduplication: check webhookEvents collection
+    // 2. Atomically claim the event. Failed events and expired processing leases
+    // may be retried; completed events are permanently deduplicated.
     const eventRef = db.collection(collections.webhookEvents).doc(eventId);
-    const eventSnap = await eventRef.get();
-    if (eventSnap.exists) {
-      logger.info(`Webhook event ${eventId} already processed. Skipping.`);
-      return { status: 'DUPLICATE_IGNORED' };
-    }
+    const nowMs = Date.now();
+    const claimResult = await db.runTransaction(async (tx): Promise<'CLAIMED' | 'DUPLICATE' | 'PROCESSING'> => {
+      const eventSnap = await tx.get(eventRef);
+      const existing = eventSnap.exists ? eventSnap.data() : undefined;
+      const decision = decideWebhookClaim(existing, nowMs);
 
-    await eventRef.set({
-      id: eventId,
-      event: eventType,
-      receivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      if (decision !== 'CLAIMED') {
+        return decision;
+      }
+
+      tx.set(eventRef, {
+        id: eventId,
+        event: eventType,
+        status: 'PROCESSING',
+        receivedAt: existing?.receivedAt || admin.firestore.FieldValue.serverTimestamp(),
+        processingStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processingLeaseUntil: nowMs + 60_000,
+        attemptCount: (typeof existing?.attemptCount === 'number' ? existing.attemptCount : 0) + 1,
+      }, { merge: true });
+      return 'CLAIMED';
     });
 
-    logger.info(`Processing Razorpay webhook event: ${eventType} (ID: ${eventId})`);
+    if (claimResult === 'DUPLICATE') {
+      logger.info(`Webhook event ${eventId} already completed. Skipping duplicate.`);
+      return { status: 'DUPLICATE_IGNORED' };
+    }
+    if (claimResult === 'PROCESSING') {
+      logger.info(`Webhook event ${eventId} is already being processed.`);
+      return { status: 'ALREADY_PROCESSING' };
+    }
+
+    try {
+      logger.info(`Processing Razorpay webhook event: ${eventType} (ID: ${eventId})`);
 
     // 3. Handle Events
     if (eventType === 'payment.captured') {
@@ -399,9 +416,15 @@ export class PaymentService {
       const orderId = paymentEntity?.order_id;
       const paymentId = paymentEntity?.id;
       const amount = paymentEntity?.amount;
+      const currency = paymentEntity?.currency;
 
       if (!orderId) {
         logger.warn('Webhook payment.captured missing order_id');
+        await eventRef.update({
+          status: 'PROCESSED',
+          result: 'SKIPPED_NO_ORDER_ID',
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
         return { status: 'SKIPPED_NO_ORDER_ID' };
       }
 
@@ -413,39 +436,52 @@ export class PaymentService {
 
       if (!paymentSnap.empty) {
         const paymentDoc = paymentSnap.docs[0];
-        const pData = paymentDoc.data() as Payment;
+        const pData = paymentSnap.docs[0].data() as Payment;
 
-        const now = admin.firestore.FieldValue.serverTimestamp();
-        await paymentDoc.ref.update({
-          status: 'CAPTURED',
-          paymentId,
-          webhookReceived: true,
-          capturedAt: now,
-          paidAt: now,
-          updatedAt: now,
-        });
-
-        // Trigger atomic confirmation
-        const confirmResult = await appointmentService.confirmAppointmentWithPayment(
-          pData.appointmentId,
-          paymentDoc.id,
-          amount || pData.amount,
-          'INR'
-        );
-
-        if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
-          logger.error(
-            `Webhook confirmation reconciliation required for appointment ${pData.appointmentId}: ${confirmResult.reason}`
-          );
+        // Never confirm or mark a payment captured based on a mismatched webhook payload.
+        if (!isCapturedPaymentConsistent({ paymentId, amount, currency }, pData.amount, 'INR')) {
+          const reason = `Webhook amount/currency/payment ID mismatch for order ${orderId}`;
+          logger.error(reason);
           await paymentDoc.ref.update({
             status: 'RECONCILIATION_REQUIRED',
-            errorMetadata: { reason: confirmResult.reason },
+            webhookReceived: true,
+            errorMetadata: { reason, receivedAmount: amount, receivedCurrency: currency },
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
-        }
+        } else {
+          const now = admin.firestore.FieldValue.serverTimestamp();
+          await paymentDoc.ref.update({
+            status: 'CAPTURED',
+            paymentId,
+            webhookReceived: true,
+            capturedAt: now,
+            paidAt: now,
+            updatedAt: now,
+          });
 
-        // Trigger notification queue
-        notificationService.processOutboxQueue().catch(() => {});
+          // Trigger atomic confirmation only after the event matches the stored order.
+          const confirmResult = await appointmentService.confirmAppointmentWithPayment(
+            pData.appointmentId,
+            paymentDoc.id,
+            amount,
+            currency
+          );
+
+          if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
+            logger.error(
+              `Webhook confirmation reconciliation required for appointment ${pData.appointmentId}: ${confirmResult.reason}`
+            );
+            await paymentDoc.ref.update({
+              status: 'RECONCILIATION_REQUIRED',
+              errorMetadata: { reason: confirmResult.reason },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+
+          notificationService.processOutboxQueue().catch((err) => {
+            logger.error('Webhook notification outbox processing failed', err);
+          });
+        }
       }
     } else if (eventType === 'payment.failed') {
       const paymentEntity = eventPayload?.payload?.payment?.entity;
@@ -480,7 +516,25 @@ export class PaymentService {
       }
     }
 
-    return { status: 'PROCESSED' };
+      await eventRef.update({
+        status: 'PROCESSED',
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        processingLeaseUntil: null,
+      });
+      return { status: 'PROCESSED' };
+    } catch (error) {
+      try {
+        await eventRef.update({
+          status: 'FAILED',
+          failureReason: error instanceof Error ? error.message : 'Unknown webhook processing error',
+          failedAt: admin.firestore.FieldValue.serverTimestamp(),
+          processingLeaseUntil: null,
+        });
+      } catch (markFailedError) {
+        logger.error(`Unable to record failed webhook event ${eventId}`, markFailedError);
+      }
+      throw error;
+    }
   }
 
   /**

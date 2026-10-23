@@ -4,6 +4,8 @@ import { appointmentService } from '../services/appointment.service';
 import { notificationService } from '../services/notification.service';
 import { sendSuccess, sendCreated, sendPaginated } from '../utils/response';
 import { UnauthorizedError, ForbiddenError } from '../utils/errors';
+import { resolveDoctorId } from '../utils/identity';
+import { assertAppointmentAccess } from '../utils/appointment-access';
 
 export class AppointmentController {
   /**
@@ -56,6 +58,9 @@ export class AppointmentController {
         req.query as Record<string, string>;
 
       const role = req.user['role'];
+      if (!['ADMIN', 'DOCTOR', 'PATIENT'].includes(String(role))) {
+        throw new ForbiddenError('Your account does not have a supported appointment role');
+      }
 
       const result = await appointmentService.listAppointments({
         page: parseInt(page),
@@ -67,7 +72,7 @@ export class AppointmentController {
             : req.query.patientId as string | undefined,
         doctorId:
           role === 'DOCTOR'
-            ? req.user.uid
+            ? resolveDoctorId(req.user)
             : req.query.doctorId as string | undefined,
       });
 
@@ -84,16 +89,7 @@ export class AppointmentController {
       const id = String(req.params.id);
       const appointment = await appointmentService.getAppointmentById(id);
 
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      // Patients can only view their own appointments; doctors can only view appointments assigned to them; admins can view all.
-      if (userRole === 'PATIENT' && appointment.patientId !== userId) {
-        throw new ForbiddenError('You can only view your own appointment records');
-      }
-      if (userRole === 'DOCTOR' && appointment.doctorId !== userId) {
-        throw new ForbiddenError('You can only view appointments assigned to you');
-      }
+      assertAppointmentAccess(req.user, appointment);
 
       sendSuccess(res, appointment);
     } catch (err) {
@@ -103,7 +99,14 @@ export class AppointmentController {
 
   async confirmAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      if (!req.user) throw new UnauthorizedError();
       const id = String(req.params.id);
+      if (req.user.role === 'DOCTOR') {
+        const existing = await appointmentService.getAppointmentById(id);
+        if (existing.doctorId !== resolveDoctorId(req.user)) {
+          throw new ForbiddenError('You can only confirm appointments assigned to you');
+        }
+      }
 
       const appointment = await appointmentService.confirmAppointment(id);
 
@@ -115,7 +118,14 @@ export class AppointmentController {
 
   async completeAppointment(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
     try {
+      if (!req.user) throw new UnauthorizedError();
       const id = String(req.params.id);
+      if (req.user.role === 'DOCTOR') {
+        const existing = await appointmentService.getAppointmentById(id);
+        if (existing.doctorId !== resolveDoctorId(req.user)) {
+          throw new ForbiddenError('You can only complete appointments assigned to you');
+        }
+      }
 
       const appointment = await appointmentService.completeAppointment(id);
 
@@ -133,15 +143,7 @@ export class AppointmentController {
       const { reason = 'Cancelled by user' } = req.body;
 
       const existingAppointment = await appointmentService.getAppointmentById(id);
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      if (userRole === 'PATIENT' && existingAppointment.patientId !== userId) {
-        throw new ForbiddenError('You can only cancel your own appointments');
-      }
-      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== userId) {
-        throw new ForbiddenError('You can only cancel appointments assigned to you');
-      }
+      assertAppointmentAccess(req.user, existingAppointment);
 
       const appointment = await appointmentService.cancelAppointment(
         id,
@@ -150,7 +152,7 @@ export class AppointmentController {
 
       notificationService
         .createNotification(
-          req.user.uid,
+          existingAppointment.patientId,
           'APPOINTMENT_CANCELLED',
           'Appointment Cancelled',
           `Your appointment on ${appointment.date} has been cancelled.`
@@ -171,15 +173,7 @@ export class AppointmentController {
       const { newDate, newTime, reason } = req.body;
 
       const existingAppointment = await appointmentService.getAppointmentById(id);
-      const userRole = req.user['role'];
-      const userId = req.user.uid;
-
-      if (userRole === 'PATIENT' && existingAppointment.patientId !== userId) {
-        throw new ForbiddenError('You can only reschedule your own appointments');
-      }
-      if (userRole === 'DOCTOR' && existingAppointment.doctorId !== userId) {
-        throw new ForbiddenError('You can only reschedule appointments assigned to you');
-      }
+      assertAppointmentAccess(req.user, existingAppointment);
 
       const appointment = await appointmentService.rescheduleAppointment(id, {
         newDate,

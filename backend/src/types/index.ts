@@ -17,7 +17,7 @@ export interface UserProfile {
 }
 
 export interface AuthenticatedRequest extends Request {
-  user?: DecodedIdToken & { role?: UserRole };
+  user?: DecodedIdToken & { role?: UserRole; doctorId?: string };
 }
 
 // ─── Doctor ──────────────────────────────────────────────────────────────────

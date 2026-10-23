@@ -19,9 +19,11 @@ import {
   Stethoscope,
 } from "lucide-react"
 import ProtectedRoute from "@/components/auth/ProtectedRoute"
+import { useAuth } from "@/lib/auth-context"
+import { apiUrl } from "@/lib/api"
 
 // ---------- Types ----------
-type SlotStatus = "available" | "booked"
+type SlotStatus = "available" | "booked" | "blocked" | "reserved"
 interface Slot {
   id: string
   startTime: string
@@ -31,7 +33,7 @@ interface Slot {
   capacity: number
 }
 
-type AppointmentStatus = "upcoming" | "completed"
+type AppointmentStatus = "upcoming" | "completed" | "pending"
 interface Appointment {
   id: string
   patientName: string
@@ -47,58 +49,6 @@ interface NotificationItem {
   time: string
 }
 
-// ---------- Mock Data ----------
-const days = ["Mon 8", "Tue 9", "Wed 10", "Thu 11", "Fri 12"]
-
-const slotsByDay: Record<string, Slot[]> = {
-  "Mon 8": [
-    { id: "s1", startTime: "09:00 AM", endTime: "09:30 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s2", startTime: "09:30 AM", endTime: "10:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s3", startTime: "10:00 AM", endTime: "10:30 AM", status: "booked", booked: 1, capacity: 1 },
-    { id: "s4", startTime: "10:30 AM", endTime: "11:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s5", startTime: "11:00 AM", endTime: "11:30 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s6", startTime: "11:30 AM", endTime: "12:00 PM", status: "available", booked: 0, capacity: 1 },
-  ],
-  "Tue 9": [
-    { id: "s7", startTime: "09:00 AM", endTime: "09:30 AM", status: "booked", booked: 1, capacity: 1 },
-    { id: "s8", startTime: "09:30 AM", endTime: "10:00 AM", status: "available", booked: 0, capacity: 1 },
-    { id: "s9", startTime: "10:00 AM", endTime: "10:30 AM", status: "available", booked: 0, capacity: 1 },
-  ],
-}
-
-const appointments: Appointment[] = [
-  {
-    id: "a1",
-    patientName: "Aarav Menon",
-    date: "Mon 8 Sep",
-    time: "09:30 AM",
-    reason: "Follow-up: Varicose Vein Treatment",
-    status: "upcoming",
-  },
-  {
-    id: "a2",
-    patientName: "Priya Suresh",
-    date: "Mon 8 Sep",
-    time: "11:00 AM",
-    reason: "Initial Consultation: Pain Management",
-    status: "upcoming",
-  },
-  {
-    id: "a3",
-    patientName: "Karthik Raja",
-    date: "Fri 5 Sep",
-    time: "02:00 PM",
-    reason: "Post-Procedure Review",
-    status: "completed",
-  },
-]
-
-const notifications: NotificationItem[] = [
-  { id: "n1", message: "Priya Suresh booked a new appointment", time: "5m ago" },
-  { id: "n2", message: "Aarav Menon rescheduled to 09:30 AM", time: "1h ago" },
-  { id: "n3", message: "Karthik Raja's appointment marked completed", time: "3h ago" },
-]
-
 // ---------- Component ----------
 type TabKey = "slots" | "appointments" | "manage"
 
@@ -108,39 +58,289 @@ const tabs: { key: TabKey; label: string; icon: React.ElementType }[] = [
   { key: "manage", label: "Manage Appointments", icon: Settings2 },
 ]
 
+function formatClinicDate(dateString: string): string {
+  const date = new Date(dateString + "T00:00:00")
+  if (Number.isNaN(date.getTime())) return dateString
+  return date.toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  })
+}
+
 function DoctorDashboardContent() {
   const [activeTab, setActiveTab] = useState<TabKey>("slots")
-  const [selectedDay, setSelectedDay] = useState(days[0])
+  const [days, setDays] = useState<string[]>([])
+  const [selectedDay, setSelectedDay] = useState("")
   const [notifOpen, setNotifOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   const [rescheduleId, setRescheduleId] = useState<string | null>(null)
-  const [appointmentList, setAppointmentList] = useState(appointments)
+  const [appointmentList, setAppointmentList] = useState<Appointment[]>([])
+  const [slotsByDay, setSlotsByDay] = useState<Record<string, Slot[]>>({})
+  const [notifications] = useState<NotificationItem[]>([])
   const [mounted, setMounted] = useState(false)
+  const [dashboardLoading, setDashboardLoading] = useState(true)
+  const [dashboardError, setDashboardError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [isSavingAction, setIsSavingAction] = useState(false)
+  const [rescheduleDate, setRescheduleDate] = useState("")
+  const [rescheduleTime, setRescheduleTime] = useState("")
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [showScheduleForm, setShowScheduleForm] = useState(false)
+  const [scheduleDate, setScheduleDate] = useState("")
+  const [scheduleStartTime, setScheduleStartTime] = useState("09:00")
+  const [scheduleEndTime, setScheduleEndTime] = useState("17:00")
+  const [scheduleDuration, setScheduleDuration] = useState("30")
+  const [scheduleBuffer, setScheduleBuffer] = useState("10")
+  const { user, loading: authLoading } = useAuth()
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => setMounted(true))
     return () => cancelAnimationFrame(frame)
   }, [])
 
-  const currentSlots = slotsByDay[selectedDay] ?? []
-  const upcomingAppointments = appointmentList.filter((a) => a.status === "upcoming")
+  useEffect(() => {
+    const refreshTimer = setInterval(() => setRefreshKey((value) => value + 1), 30_000)
+    return () => clearInterval(refreshTimer)
+  }, [])
 
-  // Derived stat-card numbers from the mock data above.
-  // "Pending Requests" has no real data model yet on this page — placeholder count.
+  useEffect(() => {
+    if (authLoading) return
+    if (!user) {
+      setDashboardLoading(false)
+      setDashboardError("Please sign in to load your clinic dashboard.")
+      return
+    }
+
+    let cancelled = false
+    const loadDashboard = async () => {
+      setDashboardLoading(true)
+      setDashboardError(null)
+      try {
+        const token = await user.getIdToken()
+        const [datesRes, appointmentsRes] = await Promise.all([
+          fetch(apiUrl("/availability/dates?doctorId=dr-vijay-main")),
+          fetch(apiUrl("/appointments?limit=100"), {
+            headers: { Authorization: "Bearer " + token },
+          }),
+        ])
+        if (!datesRes.ok || !appointmentsRes.ok) {
+          throw new Error("Could not load appointment or availability data.")
+        }
+
+        const [datesJson, appointmentsJson] = await Promise.all([
+          datesRes.json(),
+          appointmentsRes.json(),
+        ])
+        if (cancelled) return
+
+        const availableDays: string[] = datesJson.data?.availableDates || []
+        const rawAppointments: Array<Record<string, unknown>> = appointmentsJson.data || []
+        const mappedAppointments: Appointment[] = rawAppointments
+          .filter((item) => String(item.status || "").toUpperCase() !== "CANCELLED")
+          .map((item) => {
+            const status = String(item.status || "").toUpperCase()
+            return {
+              id: String(item.id),
+              patientName: String(item.patientName || "Patient"),
+              date: String(item.date || ""),
+              time: String(item.time || ""),
+              reason: String(item.message || item.serviceName || "Consultation"),
+              status: status === "COMPLETED" ? "completed" : status === "PENDING" ? "pending" : "upcoming",
+            }
+          })
+
+        const fetchedDays = [...new Set([
+          ...availableDays,
+          ...mappedAppointments.map((appointment) => appointment.date),
+        ])].filter(Boolean).sort()
+        setDays(fetchedDays)
+        setSelectedDay((previous) =>
+          previous && fetchedDays.includes(previous) ? previous : fetchedDays[0] || ""
+        )
+        setAppointmentList(mappedAppointments)
+      } catch (error) {
+        if (!cancelled) {
+          setDashboardError(
+            error instanceof Error ? error.message : "Could not load clinic dashboard data."
+          )
+        }
+      } finally {
+        if (!cancelled) setDashboardLoading(false)
+      }
+    }
+
+    void loadDashboard()
+    return () => {
+      cancelled = true
+    }
+  }, [user, authLoading, refreshKey])
+
+  useEffect(() => {
+    if (!selectedDay) return
+    let cancelled = false
+    const loadSlots = async () => {
+      try {
+        const res = await fetch(
+          apiUrl("/availability/slots?doctorId=dr-vijay-main&date=" + encodeURIComponent(selectedDay))
+        )
+        if (!res.ok) throw new Error("Could not load slots for this date.")
+        const json = await res.json()
+        if (cancelled) return
+        const data = json.data
+        const mapped: Slot[] = (data?.slots || []).map((slot: {
+          time: string
+          endTime?: string
+          isBooked?: boolean
+          status?: string
+        }, index: number) => {
+          const rawStatus = String(slot.status || "").toUpperCase()
+          const status: SlotStatus =
+            rawStatus === "BLOCKED" ? "blocked" :
+            rawStatus === "RESERVED" ? "reserved" :
+            slot.isBooked || rawStatus === "BOOKED" ? "booked" : "available"
+          return {
+            id: selectedDay + "-" + slot.time + "-" + index,
+            startTime: slot.time,
+            endTime: slot.endTime || "",
+            status,
+            booked: status === "booked" || status === "reserved" ? 1 : 0,
+            capacity: 1,
+          }
+        })
+        setSlotsByDay((previous) => ({ ...previous, [selectedDay]: mapped }))
+      } catch (error) {
+        if (!cancelled) {
+          setSlotsByDay((previous) => ({ ...previous, [selectedDay]: [] }))
+          setDashboardError(error instanceof Error ? error.message : "Could not load slots.")
+        }
+      }
+    }
+    void loadSlots()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedDay, refreshKey])
+
+  const currentSlots = slotsByDay[selectedDay] ?? []
+  const upcomingAppointments = appointmentList.filter((a) => a.status !== "completed")
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })
   const todaysAppointmentsCount = appointmentList.filter(
-    (a) => a.date === "Mon 8 Sep" && a.status === "upcoming"
+    (a) => a.date === today && a.status !== "completed"
   ).length
   const availableSlotsToday = currentSlots.filter((s) => s.status === "available").length
-  const pendingRequestsCount = 2 // placeholder — no backing data yet
+  const pendingRequestsCount = appointmentList.filter((a) => a.status === "pending").length
 
-  const handleCancel = (id: string) => {
-    setAppointmentList((prev) => prev.filter((a) => a.id !== id))
+  const saveSchedule = async () => {
+    if (!scheduleDate) {
+      setActionError("Choose a date for the new schedule.")
+      return
+    }
+    if (scheduleStartTime >= scheduleEndTime) {
+      setActionError("The schedule end time must be later than its start time.")
+      return
+    }
+
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/availability/schedule"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({
+          doctorId: "dr-vijay-main",
+          date: scheduleDate,
+          startTime: scheduleStartTime,
+          endTime: scheduleEndTime,
+          slotDurationMinutes: Number(scheduleDuration),
+          bufferMinutes: Number(scheduleBuffer),
+          consultationTypes: [
+            { type: "IN_PERSON", feeInPaise: 100000, durationMinutes: Number(scheduleDuration) },
+            { type: "VIDEO", feeInPaise: 80000, durationMinutes: Number(scheduleDuration) },
+            { type: "FOLLOW_UP", feeInPaise: 50000, durationMinutes: Number(scheduleDuration) },
+          ],
+          isPublished: true,
+        }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || result.message || "Schedule creation failed.")
+      setSelectedDay(scheduleDate)
+      setShowScheduleForm(false)
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Schedule creation failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
   }
 
-  const handleReschedule = (id: string) => {
-    setRescheduleId(null)
-    // Hook up real reschedule logic (date/time picker + API call) here.
-    alert(`Reschedule flow for appointment ${id} would open here.`)
+  const handleCancel = async (id: string) => {
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/appointments/" + encodeURIComponent(id) + "/cancel"), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({ reason: "Cancelled by doctor from dashboard" }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || "Appointment cancellation failed.")
+      setAppointmentList((previous) => previous.filter((appointment) => appointment.id !== id))
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Appointment cancellation failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
+  }
+
+  const handleReschedule = async (id: string) => {
+    if (!rescheduleDate || !rescheduleTime) {
+      setActionError("Choose a new date and time before rescheduling.")
+      return
+    }
+    setIsSavingAction(true)
+    setActionError(null)
+    try {
+      const token = await user?.getIdToken()
+      if (!token) throw new Error("Please sign in again.")
+      const res = await fetch(apiUrl("/appointments/" + encodeURIComponent(id) + "/reschedule"), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + token,
+        },
+        body: JSON.stringify({ newDate: rescheduleDate, newTime: rescheduleTime }),
+      })
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || "Appointment rescheduling failed.")
+      setAppointmentList((previous) =>
+        previous.map((appointment) =>
+          appointment.id === id
+            ? { ...appointment, date: rescheduleDate, time: rescheduleTime, status: "upcoming" }
+            : appointment
+        )
+      )
+      setRescheduleId(null)
+      setRescheduleDate("")
+      setRescheduleTime("")
+      setRefreshKey((value) => value + 1)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Appointment rescheduling failed.")
+    } finally {
+      setIsSavingAction(false)
+    }
   }
 
   return (
@@ -284,7 +484,7 @@ function DoctorDashboardContent() {
             </div>
             <div className="flex items-center gap-2 text-sm text-text-secondary">
               <Calendar className="w-4 h-4" />
-              Mon, 8 Sep 2026
+              {new Date().toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })}
             </div>
           </div>
 
@@ -319,7 +519,7 @@ function DoctorDashboardContent() {
                 <Clock className="w-5 h-5" />
               </div>
               <div>
-                <p className="text-text-secondary text-sm">Available Slots Today</p>
+                <p className="text-text-secondary text-sm">Available Slots</p>
                 <p className="font-heading font-bold text-2xl text-deep-trust">
                   {availableSlotsToday}
                 </p>
@@ -338,6 +538,13 @@ function DoctorDashboardContent() {
               </div>
             </div>
           </div>
+
+          {(dashboardError || actionError) && (
+            <div role="alert" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              {actionError || dashboardError}
+              <button type="button" onClick={() => setActionError(null)} className="ml-3 underline">Dismiss</button>
+            </div>
+          )}
 
           {/* Card containing underlined sub-tabs + content */}
           <div className="bg-white rounded-2xl shadow-md border border-gray-100 p-6">
@@ -379,7 +586,7 @@ function DoctorDashboardContent() {
                     >
                       {days.map((day) => (
                         <option key={day} value={day}>
-                          {day}
+                          {formatClinicDate(day)}
                         </option>
                       ))}
                     </select>
@@ -389,6 +596,49 @@ function DoctorDashboardContent() {
                     </button>
                   </div>
                 </div>
+
+                {showScheduleForm && (
+                  <div className="mt-5 rounded-xl border border-gray-200 bg-soft-sky/20 p-4">
+                    <h3 className="font-semibold text-deep-trust text-sm mb-3">Create clinic schedule</h3>
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <label className="text-xs text-text-secondary">
+                        Date
+                        <input type="date" min={new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })} value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Start time
+                        <input type="time" value={scheduleStartTime} onChange={(event) => setScheduleStartTime(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        End time
+                        <input type="time" value={scheduleEndTime} onChange={(event) => setScheduleEndTime(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary" />
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Slot duration
+                        <select value={scheduleDuration} onChange={(event) => setScheduleDuration(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary">
+                          <option value="15">15 minutes</option>
+                          <option value="20">20 minutes</option>
+                          <option value="30">30 minutes</option>
+                          <option value="45">45 minutes</option>
+                          <option value="60">60 minutes</option>
+                        </select>
+                      </label>
+                      <label className="text-xs text-text-secondary">
+                        Buffer between slots
+                        <select value={scheduleBuffer} onChange={(event) => setScheduleBuffer(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-text-primary">
+                          <option value="0">No buffer</option>
+                          <option value="5">5 minutes</option>
+                          <option value="10">10 minutes</option>
+                          <option value="15">15 minutes</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                      <button type="button" onClick={() => setShowScheduleForm(false)} className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-text-secondary">Cancel</button>
+                      <button type="button" disabled={isSavingAction} onClick={() => void saveSchedule()} className="rounded-lg bg-medical-blue px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">{isSavingAction ? "Saving..." : "Publish schedule"}</button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="overflow-x-auto mt-6">
                   <table className="w-full text-sm">
@@ -404,17 +654,21 @@ function DoctorDashboardContent() {
                       {currentSlots.map((slot) => (
                         <tr key={slot.id} className="border-b border-gray-50 last:border-0">
                           <td className="py-4 text-text-primary">
-                            {slot.startTime} – {slot.endTime}
+                            {slot.endTime ? slot.startTime + " – " + slot.endTime : slot.startTime}
                           </td>
                           <td className="py-4">
                             <span
                               className={`px-3 py-1 rounded-full text-xs font-medium ${
                                 slot.status === "available"
                                   ? "bg-emerald-50 text-emerald-700"
+                                  : slot.status === "blocked"
+                                  ? "bg-red-50 text-red-700"
+                                  : slot.status === "reserved"
+                                  ? "bg-amber-50 text-amber-700"
                                   : "bg-soft-sky text-medical-blue"
                               }`}
                             >
-                              {slot.status === "available" ? "Available" : "Booked"}
+                              {slot.status === "available" ? "Available" : slot.status === "blocked" ? "Blocked" : slot.status === "reserved" ? "Reserved" : "Booked"}
                             </span>
                           </td>
                           <td className="py-4 text-text-primary">
@@ -450,6 +704,7 @@ function DoctorDashboardContent() {
                   Booked Appointments
                 </h2>
                 <div className="space-y-3">
+                  {dashboardLoading && <p className="text-sm text-text-secondary">Loading appointments...</p>}
                   {appointmentList.map((appt) => (
                     <div
                       key={appt.id}
@@ -470,22 +725,24 @@ function DoctorDashboardContent() {
                       </div>
                       <div className="flex items-center justify-between sm:justify-end gap-4 flex-shrink-0">
                         <div className="text-right">
-                          <p className="text-sm font-medium text-deep-trust">{appt.date}</p>
+                          <p className="text-sm font-medium text-deep-trust">{formatClinicDate(appt.date)}</p>
                           <p className="text-xs text-text-secondary">{appt.time}</p>
                         </div>
                         <span
                           className={`flex items-center gap-1 px-3 py-1 rounded-full text-xs font-medium flex-shrink-0 ${
-                            appt.status === "upcoming"
-                              ? "bg-soft-sky text-medical-blue"
-                              : "bg-emerald-50 text-emerald-700"
+                            appt.status === "completed"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : appt.status === "pending"
+                              ? "bg-amber-50 text-amber-700"
+                              : "bg-soft-sky text-medical-blue"
                           }`}
                         >
-                          {appt.status === "upcoming" ? (
+                          {appt.status !== "completed" ? (
                             <Clock className="w-3 h-3" />
                           ) : (
                             <CheckCircle2 className="w-3 h-3" />
                           )}
-                          {appt.status === "upcoming" ? "Upcoming" : "Completed"}
+                          {appt.status === "completed" ? "Completed" : appt.status === "pending" ? "Awaiting payment" : "Upcoming"}
                         </span>
                       </div>
                     </div>
@@ -515,7 +772,7 @@ function DoctorDashboardContent() {
                             {appt.patientName}
                           </p>
                           <p className="text-text-secondary text-xs truncate">
-                            {appt.date} · {appt.time}
+                            {formatClinicDate(appt.date)} · {appt.time}
                           </p>
                         </div>
                       </div>
@@ -530,7 +787,8 @@ function DoctorDashboardContent() {
                         </button>
                         <button
                           onClick={() => handleCancel(appt.id)}
-                          className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors cursor-pointer whitespace-nowrap"
+                          disabled={isSavingAction}
+                          className="flex items-center gap-1 px-4 py-2 text-sm font-medium text-red-600 border border-red-200 rounded-xl hover:bg-red-50 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                         >
                           <XCircle className="w-4 h-4" />
                           Cancel
@@ -566,14 +824,33 @@ function DoctorDashboardContent() {
                 <X className="w-4 h-4 text-deep-trust" />
               </button>
             </div>
-            <p className="text-sm text-text-secondary mb-6">
-              Plug in your date/time picker here before calling the reschedule API.
-            </p>
+            <div className="space-y-3 mb-5">
+              <label className="block text-sm text-text-secondary">
+                New date
+                <input
+                  type="date"
+                  min={new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" })}
+                  value={rescheduleDate}
+                  onChange={(event) => setRescheduleDate(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-text-primary"
+                />
+              </label>
+              <label className="block text-sm text-text-secondary">
+                New time
+                <input
+                  type="time"
+                  value={rescheduleTime}
+                  onChange={(event) => setRescheduleTime(event.target.value)}
+                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-text-primary"
+                />
+              </label>
+            </div>
             <button
+              disabled={isSavingAction}
               onClick={() => handleReschedule(rescheduleId)}
-              className="w-full bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl py-2.5 text-sm font-semibold shadow-md cursor-pointer"
+              className="w-full bg-medical-blue hover:bg-medical-blue-hover text-white rounded-xl py-2.5 text-sm font-semibold shadow-md cursor-pointer disabled:opacity-50"
             >
-              Confirm Reschedule
+              {isSavingAction ? "Saving..." : "Confirm Reschedule"}
             </button>
           </div>
         </div>

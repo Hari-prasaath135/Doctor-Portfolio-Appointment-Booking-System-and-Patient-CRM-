@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import { db, collections, admin } from '../config/firebase';
 import { Notification, NotificationType } from '../types';
 import { NotFoundError } from '../utils/errors';
+import { assertNotificationOwner } from '../utils/notification-access';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
 
@@ -21,9 +22,8 @@ const transporter =
       })
     : null;
 
-const EMAIL_FROM = `${process.env.EMAIL_FROM_NAME || 'Dr. Vijay Clinic'} <${
-  EMAIL_USER || 'clinic@drVijay.com'
-}>`;
+const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM || EMAIL_USER || 'clinic@drVijay.com';
+const EMAIL_FROM = `${process.env.EMAIL_FROM_NAME || 'Dr. Vijay Clinic'} <${EMAIL_FROM_ADDRESS}>`;
 
 // ─── Email Templates ──────────────────────────────────────────────────────────
 
@@ -156,6 +156,7 @@ function buildEmailHtml(
  * - Send email notifications via Nodemailer + Gmail SMTP
  */
 export class NotificationService {
+  private isProcessingOutbox = false;
   /**
    * Create an in-app notification in Firestore.
    */
@@ -207,12 +208,15 @@ export class NotificationService {
   /**
    * Mark a notification as read.
    */
-  async markAsRead(id: string): Promise<void> {
+  async markAsRead(id: string, userId: string): Promise<void> {
     const ref = db.collection(collections.notifications).doc(id);
+    const snap = await ref.get();
 
-    if (!(await ref.get()).exists) {
+    if (!snap.exists) {
       throw new NotFoundError('Notification');
     }
+
+    assertNotificationOwner(snap.data()?.userId, userId);
 
     await ref.update({ isRead: true });
   }
@@ -509,10 +513,7 @@ export class NotificationService {
   ): Promise<void> {
     try {
       if (!transporter) {
-        logger.warn(
-          'Gmail email configuration is missing. Email was not sent.'
-        );
-        return;
+        throw new Error('Gmail email configuration is missing (EMAIL_USER and EMAIL_PASSWORD).');
       }
 
       const html = buildEmailHtml(
@@ -532,8 +533,7 @@ export class NotificationService {
       logger.info(`Email sent to ${to}: ${subject}`);
     } catch (err) {
       logger.error(`Failed to send email to ${to}`, err);
-
-      // Email failures should not break the request.
+      throw err instanceof Error ? err : new Error('Email delivery failed');
     }
   }
 
@@ -542,7 +542,13 @@ export class NotificationService {
    * Delivers confirmation emails with bounded retries outside of the transaction.
    */
   async processOutboxQueue(): Promise<{ processed: number; failures: number }> {
-    const snap = await db
+    if (this.isProcessingOutbox) {
+      return { processed: 0, failures: 0 };
+    }
+
+    this.isProcessingOutbox = true;
+    try {
+      const snap = await db
       .collection(collections.notificationOutbox)
       .where('status', 'in', ['PENDING', 'RETRY'])
       .limit(10)
@@ -556,15 +562,17 @@ export class NotificationService {
       const attempts = (job.attempts || 0) + 1;
 
       try {
-        if (job.recipientEmail) {
-          await this.sendAppointmentConfirmation(
-            job.recipientEmail,
-            job.patientName || 'Patient',
-            job.appointmentDate,
-            job.appointmentTime,
-            job.serviceName || 'Consultation'
-          );
+        if (!job.recipientEmail) {
+          throw new Error('Notification outbox job has no recipient email');
         }
+
+        await this.sendAppointmentConfirmation(
+          job.recipientEmail,
+          job.patientName || 'Patient',
+          job.appointmentDate,
+          job.appointmentTime,
+          job.serviceName || 'Consultation'
+        );
 
         // Also create an in-app notification
         if (job.patientId) {
@@ -596,7 +604,10 @@ export class NotificationService {
       }
     }
 
-    return { processed, failures };
+      return { processed, failures };
+    } finally {
+      this.isProcessingOutbox = false;
+    }
   }
 }
 
