@@ -21,9 +21,8 @@ const transporter =
       })
     : null;
 
-const EMAIL_FROM = `${process.env.EMAIL_FROM_NAME || 'Dr. Vijay Clinic'} <${
-  EMAIL_USER || 'clinic@drVijay.com'
-}>`;
+const EMAIL_FROM_ADDRESS = process.env.EMAIL_FROM || EMAIL_USER || 'clinic@drVijay.com';
+const EMAIL_FROM = `${process.env.EMAIL_FROM_NAME || 'Dr. Vijay Clinic'} <${EMAIL_FROM_ADDRESS}>`;
 
 // ─── Email Templates ──────────────────────────────────────────────────────────
 
@@ -509,10 +508,7 @@ export class NotificationService {
   ): Promise<void> {
     try {
       if (!transporter) {
-        logger.warn(
-          'Gmail email configuration is missing. Email was not sent.'
-        );
-        return;
+        throw new Error('Gmail email configuration is missing (EMAIL_USER and EMAIL_PASSWORD).');
       }
 
       const html = buildEmailHtml(
@@ -532,8 +528,7 @@ export class NotificationService {
       logger.info(`Email sent to ${to}: ${subject}`);
     } catch (err) {
       logger.error(`Failed to send email to ${to}`, err);
-
-      // Email failures should not break the request.
+      throw err instanceof Error ? err : new Error('Email delivery failed');
     }
   }
 
@@ -556,15 +551,17 @@ export class NotificationService {
       const attempts = (job.attempts || 0) + 1;
 
       try {
-        if (job.recipientEmail) {
-          await this.sendAppointmentConfirmation(
-            job.recipientEmail,
-            job.patientName || 'Patient',
-            job.appointmentDate,
-            job.appointmentTime,
-            job.serviceName || 'Consultation'
-          );
+        if (!job.recipientEmail) {
+          throw new Error('Notification outbox job has no recipient email');
         }
+
+        await this.sendAppointmentConfirmation(
+          job.recipientEmail,
+          job.patientName || 'Patient',
+          job.appointmentDate,
+          job.appointmentTime,
+          job.serviceName || 'Consultation'
+        );
 
         // Also create an in-app notification
         if (job.patientId) {
