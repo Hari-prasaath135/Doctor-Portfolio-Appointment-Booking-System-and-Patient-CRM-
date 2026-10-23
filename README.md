@@ -89,3 +89,7 @@ Use test credentials and test patient data only. Never commit production credent
 ## Important implementation note
 
 Some frontend API routes currently contain in-memory demo data. In-memory records reset when the server restarts and are not shared across instances. Confirm that production booking and dashboard flows use the persistent backend before deploying for real patients.
+
+## Frontend API configuration
+
+The booking wizard calls the Express backend through `NEXT_PUBLIC_API_BASE_URL`. Copy the root `.env.example` to `.env.local` for local configuration. For local development, the API helper defaults to `http://localhost:5000/api/v1`; for production, configure the deployed HTTPS backend base URL including `/api/v1` before running `next build` or deploying. Next.js embeds `NEXT_PUBLIC_*` values into the browser bundle at build time, so changing this value requires a rebuild. Never place private credentials in a `NEXT_PUBLIC_*` variable.
