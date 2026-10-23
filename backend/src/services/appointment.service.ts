@@ -236,6 +236,10 @@ export class AppointmentService {
       );
       if (idx !== -1) {
         slots[idx].isBooked = false;
+        slots[idx].status = 'AVAILABLE';
+        delete slots[idx].appointmentId;
+        delete slots[idx].reservedUntil;
+        delete slots[idx].reservedBy;
         await availRef.update({
           slots,
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -263,8 +267,10 @@ export class AppointmentService {
     }
 
     const { newDate, newTime } = input;
+    if (newDate === appointment.date && newTime === appointment.time) {
+      throw new ConflictError('Choose a different date or time to reschedule');
+    }
 
-    // Find new availability
     const newAvailSnap = await db
       .collection(collections.availability)
       .where('doctorId', '==', appointment.doctorId)
@@ -276,55 +282,101 @@ export class AppointmentService {
       throw new ConflictError(`No availability for the requested date ${newDate}`);
     }
 
-    const newAvailRef = newAvailSnap.docs[0].ref;
-    const appointmentRef = db.collection(collections.appointments).doc(id);
+    const newAvailabilityDoc = newAvailSnap.docs[0];
+    const newAvailabilityData = newAvailabilityDoc.data();
+    if (newAvailabilityData.isLeave || newAvailabilityData.isPublished === false) {
+      throw new ConflictError('The requested schedule is not available for booking');
+    }
 
-    // Old availability
+    const newAvailRef = newAvailabilityDoc.ref;
+    const appointmentRef = db.collection(collections.appointments).doc(id);
     const oldAvailSnap = await db
       .collection(collections.availability)
       .where('doctorId', '==', appointment.doctorId)
       .where('date', '==', appointment.date)
       .limit(1)
       .get();
+    const oldAvailRef = oldAvailSnap.empty ? null : oldAvailSnap.docs[0].ref;
+    const sameAvailability = oldAvailRef?.path === newAvailRef.path;
 
     await db.runTransaction(async (tx) => {
-      // Release old slot
-      if (!oldAvailSnap.empty) {
-        const latestOld = await tx.get(oldAvailSnap.docs[0].ref);
-        const oldSlots = latestOld.data()?.slots || [];
-        const oldIdx = oldSlots.findIndex(
-          (s: { time: string; isBooked: boolean }) => s.time === appointment.time
-        );
-        if (oldIdx !== -1) {
-          oldSlots[oldIdx].isBooked = false;
-          tx.update(oldAvailSnap.docs[0].ref, {
+      // Read all relevant documents before any writes. When both slots are on
+      // the same date, update one shared slot array to avoid overwriting a release.
+      const latestNew = await tx.get(newAvailRef);
+      const latestOld = oldAvailRef && !sameAvailability
+        ? await tx.get(oldAvailRef)
+        : latestNew;
+
+      const newSlots = latestNew.data()?.slots || [];
+      const oldSlots = latestOld.data()?.slots || [];
+      const oldIdx = oldSlots.findIndex(
+        (slot: { time: string; appointmentId?: string }) =>
+          slot.time === appointment.time &&
+          (!slot.appointmentId || slot.appointmentId === id)
+      );
+      const newIdx = newSlots.findIndex(
+        (slot: { time: string }) => slot.time === newTime
+      );
+
+      if (newIdx === -1) throw new NotFoundError(`Slot ${newTime}`);
+
+      const targetSlot = newSlots[newIdx];
+      const reservationActive =
+        targetSlot.status === 'RESERVED' &&
+        targetSlot.reservedUntil &&
+        new Date(targetSlot.reservedUntil) > new Date();
+      const targetIsOldSlot = sameAvailability && oldIdx === newIdx;
+      if (
+        !targetIsOldSlot &&
+        (targetSlot.isBooked ||
+          targetSlot.status === 'BOOKED' ||
+          targetSlot.status === 'BLOCKED' ||
+          reservationActive)
+      ) {
+        throw new ConflictError(`Slot ${newTime} on ${newDate} is already booked or reserved`);
+      }
+
+      if (oldIdx !== -1) {
+        oldSlots[oldIdx].isBooked = false;
+        oldSlots[oldIdx].status = 'AVAILABLE';
+        delete oldSlots[oldIdx].appointmentId;
+        delete oldSlots[oldIdx].reservedUntil;
+        delete oldSlots[oldIdx].reservedBy;
+      }
+
+      const isConfirmed = appointment.status === 'CONFIRMED';
+      newSlots[newIdx].isBooked = true;
+      newSlots[newIdx].status = isConfirmed ? 'BOOKED' : 'RESERVED';
+      newSlots[newIdx].appointmentId = id;
+      newSlots[newIdx].reservedBy = appointment.patientId;
+      if (isConfirmed) {
+        delete newSlots[newIdx].reservedUntil;
+      } else {
+        newSlots[newIdx].reservedUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      }
+
+      if (sameAvailability) {
+        tx.update(newAvailRef, {
+          slots: newSlots,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } else {
+        if (oldAvailRef && oldIdx !== -1) {
+          tx.update(oldAvailRef, {
             slots: oldSlots,
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
         }
+        tx.update(newAvailRef, {
+          slots: newSlots,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
       }
-
-      // Claim new slot
-      const latestNew = await tx.get(newAvailRef);
-      const newSlots = latestNew.data()?.slots || [];
-      const newIdx = newSlots.findIndex(
-        (s: { time: string; isBooked: boolean }) => s.time === newTime
-      );
-
-      if (newIdx === -1) throw new NotFoundError(`Slot ${newTime}`);
-      if (newSlots[newIdx].isBooked)
-        throw new ConflictError(`Slot ${newTime} on ${newDate} is already booked`);
-
-      newSlots[newIdx].isBooked = true;
-      tx.update(newAvailRef, {
-        slots: newSlots,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
 
       tx.update(appointmentRef, {
         date: newDate,
         time: newTime,
-        status: 'RESCHEDULED',
+        status: isConfirmed ? 'CONFIRMED' : 'RESCHEDULED',
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     });
