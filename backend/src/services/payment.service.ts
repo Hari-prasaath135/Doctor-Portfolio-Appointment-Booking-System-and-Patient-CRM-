@@ -14,6 +14,7 @@ import { getRazorpayConfig, getRazorpayClient } from '../config/razorpay';
 import { appointmentService } from './appointment.service';
 import { notificationService } from './notification.service';
 import { safeCompareHexSignature } from '../utils/signatures';
+import { decideWebhookClaim } from '../utils/webhook-claim';
 
 export interface CreateRazorpayOrderInput {
   appointmentId: string;
@@ -385,17 +386,10 @@ export class PaymentService {
     const claimResult = await db.runTransaction(async (tx): Promise<'CLAIMED' | 'DUPLICATE' | 'PROCESSING'> => {
       const eventSnap = await tx.get(eventRef);
       const existing = eventSnap.exists ? eventSnap.data() : undefined;
+      const decision = decideWebhookClaim(existing, nowMs);
 
-      if (existing?.status === 'PROCESSED') {
-        return 'DUPLICATE';
-      }
-
-      if (
-        existing?.status === 'PROCESSING' &&
-        typeof existing.processingLeaseUntil === 'number' &&
-        existing.processingLeaseUntil > nowMs
-      ) {
-        return 'PROCESSING';
+      if (decision !== 'CLAIMED') {
+        return decision;
       }
 
       tx.set(eventRef, {
