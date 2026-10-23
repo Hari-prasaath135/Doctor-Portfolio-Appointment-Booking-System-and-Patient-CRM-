@@ -381,16 +381,13 @@ export class PaymentService {
     // 2. Atomically claim the event. Failed events and expired processing leases
     // may be retried; completed events are permanently deduplicated.
     const eventRef = db.collection(collections.webhookEvents).doc(eventId);
-    let claimResult: 'CLAIMED' | 'DUPLICATE' | 'PROCESSING' = 'CLAIMED';
     const nowMs = Date.now();
-
-    await db.runTransaction(async (tx) => {
+    const claimResult = await db.runTransaction(async (tx): Promise<'CLAIMED' | 'DUPLICATE' | 'PROCESSING'> => {
       const eventSnap = await tx.get(eventRef);
       const existing = eventSnap.exists ? eventSnap.data() : undefined;
 
       if (existing?.status === 'PROCESSED') {
-        claimResult = 'DUPLICATE';
-        return;
+        return 'DUPLICATE';
       }
 
       if (
@@ -398,8 +395,7 @@ export class PaymentService {
         typeof existing.processingLeaseUntil === 'number' &&
         existing.processingLeaseUntil > nowMs
       ) {
-        claimResult = 'PROCESSING';
-        return;
+        return 'PROCESSING';
       }
 
       tx.set(eventRef, {
@@ -411,7 +407,7 @@ export class PaymentService {
         processingLeaseUntil: nowMs + 60_000,
         attemptCount: (typeof existing?.attemptCount === 'number' ? existing.attemptCount : 0) + 1,
       }, { merge: true });
-      claimResult = 'CLAIMED';
+      return 'CLAIMED';
     });
 
     if (claimResult === 'DUPLICATE') {
