@@ -1,36 +1,91 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dr. Vijay Clinic — Doctor Portfolio, Appointments & Patient CRM
 
-## Getting Started
+A Next.js doctor portfolio and appointment-booking experience with an Express/TypeScript API. The project includes Firebase integrations, Razorpay payment handling, appointment availability, notifications, video consultation endpoints, and admin/doctor dashboards.
 
-First, run the development server:
+## Repository layout
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+```text
+.
+├── src/                     # Next.js App Router pages, API routes, components, and client libraries
+├── public/                  # Static assets
+├── backend/
+│   ├── src/
+│   │   ├── config/          # Firebase and payment provider setup
+│   │   ├── controllers/     # HTTP request handlers
+│   │   ├── middleware/      # Authentication, roles, and validation
+│   │   ├── routes/          # Express route registration
+│   │   ├── services/        # Application/business logic
+│   │   ├── types/           # Shared backend types
+│   │   └── utils/           # Errors, logging, and response helpers
+│   ├── .env.example         # Environment variable reference (no real secrets)
+│   └── package.json
+├── .github/workflows/       # Automated CI checks
+├── firestore.rules
+├── storage.rules
+└── package.json
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Requirements
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- Node.js 22.x (CI uses Node.js 22)
+- npm
+- Firebase project credentials for live backend functionality
+- Provider credentials for payment, email, and video features when exercising those integrations
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Local development
 
-## Learn More
+### Frontend
 
-To learn more about Next.js, take a look at the following resources:
+From the repository root:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm ci
+npm run dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Open http://localhost:3000.
 
-## Deploy on Vercel
+### Backend
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+cd backend
+npm ci
+cp .env.example .env
+# Fill in credentials locally; do not commit .env or service-account files.
+npm run dev
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The API health endpoint is `GET http://localhost:5000/api/v1/health`.
+
+Build the frontend with `npm run build` from the root and compile the backend with `npm run build` from `backend/`.
+
+## Continuous integration
+
+GitHub Actions runs the following checks for pushes to `main` and maintenance branches, and for pull requests targeting `main`:
+
+1. Install frontend dependencies with `npm ci`.
+2. Run ESLint.
+3. Build the Next.js production application.
+4. Install backend dependencies with `npm ci`.
+5. Compile the backend TypeScript.
+
+The CI build uses placeholders only where configuration is needed to compile. It does not connect to Firebase, Razorpay, email, Zoom, or other external services, and therefore is not a substitute for credentialed end-to-end testing.
+
+## Integration testing checklist
+
+Before release, verify these flows in a configured test environment:
+
+- Patient sign-in and role-based access to patient, doctor, and admin views.
+- Availability lookup, booking validation, and duplicate-slot rejection.
+- Payment order creation, test-mode payment, signature/webhook verification, and persisted payment status.
+- Successful payment confirmation, appointment status updates, and email delivery.
+- Refund handling and failed/cancelled payment paths.
+- Video consultation link creation and correct appointment time association.
+- Admin/doctor dashboards reflect the same persisted appointment and payment state.
+- Invalid/expired authentication, unauthorized roles, provider failures, and retry/idempotency behavior.
+
+Use test credentials and test patient data only. Never commit production credentials, service-account JSON files, API keys, webhook secrets, or patient data.
+
+## Important implementation note
+
+Some frontend API routes currently contain in-memory demo data. In-memory records reset when the server restarts and are not shared across instances. Confirm that production booking and dashboard flows use the persistent backend before deploying for real patients.
