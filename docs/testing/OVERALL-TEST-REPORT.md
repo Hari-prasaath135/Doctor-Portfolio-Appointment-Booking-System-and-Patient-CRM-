@@ -7,7 +7,7 @@
 
 ## Executive summary
 
-The original CI baseline passed on commit `9eb073fb3f33f96f022bdee32b63e71c6c572d59`. On code commit `72ef9aed5fbf2d7715383f05fd7f1dd1cdcaae54`, the backend build and all **33 unit tests passed**, and frontend lint passed. The production-build step on that run was superseded before completion; a production build had passed on `9eb073f`, and frontend source files have not changed since that passing build. The latest branch-head CI is pending after the report update.
+On code commit `a66346fceafaf7e229ff9b1a35ce910a8936efa3`, the latest complete CI run passed: frontend lint, Next.js production build, backend TypeScript build, and **45 backend unit tests passed with 0 failures**. The report-only update that follows will trigger a fresh CI run for the final documentation commit.
 
 **Runtime integrations are not fully verified.** A successful build/unit suite does not prove Firebase, Razorpay, SMTP, or dashboard flows work end to end.
 
@@ -15,13 +15,11 @@ The original CI baseline passed on commit `9eb073fb3f33f96f022bdee32b63e71c6c572
 
 | Check | Latest confirmed result | Evidence / scope |
 |---|---|---|
-| Frontend ESLint | PASS on commit `9eb073f` | 0 errors, 143 warnings |
-| Next.js production build and TypeScript check | PASS on commit `9eb073f` | All configured app routes compiled |
-| Backend TypeScript build | PASS on commit `9eb073f` | Included in backend test job |
-| Backend unit tests | PASS on commit `72ef9ae` | 33 passed, 0 failed |
-| Frontend ESLint | PASS on commit `72ef9ae` | 0 errors; warnings remain |
-| Next.js production build | PASS on commit `9eb073f` | Frontend source has not changed since this pass; latest-head rerun pending |
-| Latest branch-head CI | PENDING | [GitHub Actions](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions) |
+| Frontend ESLint | PASS on commit `a66346f` | 0 lint errors; warnings remain |
+| Next.js production build and TypeScript check | PASS on commit `a66346f` | All configured app routes compiled |
+| Backend TypeScript build | PASS on commit `a66346f` | Included in backend test job |
+| Backend unit tests | PASS on commit `a66346f` | 45 passed, 0 failed |
+| Latest complete CI | PASS | [GitHub Actions run](https://github.com/Hari-prasaath135/Doctor-Portfolio-Appointment-Booking-System-and-Patient-CRM-/actions/runs/39910210336) |
 | Firebase/payment/email/dashboard integration | NOT RUN | Requires a dedicated test environment; see matrix below |
 
 The 143 frontend lint warnings are non-blocking under the current configuration but remain cleanup work. A green build does not prove runtime integrations work.
@@ -35,9 +33,13 @@ The 143 frontend lint warnings are non-blocking under the current configuration 
 5. **Slot release correctness:** cancellation resets slot status and clears stale reservation metadata, not just the legacy `isBooked` flag.
 6. **Rescheduling correctness:** old and new slots are updated safely when rescheduling within the same availability document; target schedules must be published and not leave schedules.
 7. **Reservation expiry and late payments:** new bookings can claim an expired reservation and cancel its stale unpaid appointment; payment confirmation refuses to overwrite a slot reassigned to another appointment.
-8. **Frontend resilience:** removed hardcoded local backend URLs from key booking/auth/dashboard flows, added availability retry UI, avoided fabricated availability fallback, reused existing appointment reservations when reopening checkout, and ensured checkout loading flags are cleared.
+8. **Payment signature safety:** Razorpay checkout and webhook HMACs use constant-time hexadecimal comparison and reject malformed signatures.
+9. **Webhook reliability:** event claims use a Firestore transaction, active processing leases prevent concurrent duplicate work, failed/expired events can be retried, and completed events are deduplicated. Captured webhook amount/currency mismatches are routed to reconciliation instead of confirming appointments.
+10. **Checkout idempotency:** a previously confirmed appointment no longer bypasses order/signature/provider verification when the checkout verification endpoint is called again.
+11. **Appointment status privacy:** status reads enforce the same patient/doctor/admin access rules as appointment record reads.
+12. **Frontend resilience:** removed hardcoded local backend URLs from key booking/auth/dashboard flows, added availability retry UI, avoided fabricated availability fallback, reused existing appointment reservations when reopening checkout, and ensured checkout loading flags are cleared.
 
-These are code-review findings and fixes; items 1–7 require the latest CI run and targeted integration tests before being considered fully verified at runtime.
+These code changes compile and the automated suite passes on commit `a66346f`. End-to-end integration behavior still requires dedicated test credentials/data.
 
 ## Automated unit-test coverage
 
@@ -49,7 +51,7 @@ The backend Node test suite currently contains the following groups:
 - Doctor identity resolution.
 - Appointment record access: owning patient, foreign patient denied, assigned doctor, mismatched doctor denied, administrator, unknown role denied, missing authentication denied.
 
-The current backend CI run executed **33 unit tests: 33 passed, 0 failed**.
+The latest backend CI run executed **45 unit tests: 45 passed, 0 failed**. Added coverage includes constant-time signature comparison (matching, mismatched, malformed, empty, and real HMAC digests) and webhook claim decisions (completed-event deduplication, active lease, expired lease, failed-event retry, first processing, and invalid lease values).
 
 ## End-to-end and integration tests still required
 
@@ -60,7 +62,7 @@ These have **not** been proven by the isolated unit tests or build checks. Run t
 | Authentication and roles | Invalid/expired token; patient, doctor, and admin access boundaries | Partially covered by unit tests; integration pending |
 | Availability | Published/unpublished dates; slot blocked; expired reservation; simultaneous booking attempts | Integration pending |
 | Appointment lifecycle | Reserve, pay, cancel, reschedule across dates and within same date; released slot becomes available | Integration pending |
-| Razorpay | Test order amount from server, invalid signature rejected, valid test payment, repeated verification, webhook replay/idempotency | Integration pending |
+| Razorpay | Test order amount from server, invalid signature rejected, valid test payment, repeated verification, webhook replay/idempotency | Signature helper and webhook claim logic unit-tested; provider integration pending |
 | Email | Correct recipient, valid SMTP test delivery, missing credentials, transient SMTP failure, outbox retry, no stuck checkout UI | Integration pending |
 | Dashboard consistency | Booking/payment/cancel/reschedule appears consistently in doctor and admin views after refresh | Integration pending |
 | Notification ownership | User cannot mark another user's notification as read | Code fix added; integration pending |
@@ -73,7 +75,7 @@ These have **not** been proven by the isolated unit tests or build checks. Run t
 - Firebase, Razorpay, and SMTP integrations have not been exercised by CI with dedicated test credentials.
 - Dashboard consistency is not yet proven by a test that creates a booking and verifies the same persisted record through both dashboards.
 - Frontend lint still reports warnings even though it passes.
-- Do not call the application fully verified until current-head CI passes and the critical appointment/payment/email integration scenarios above are exercised.
+- Do not call the application fully verified until the final report commit's CI passes and the critical appointment/payment/email integration scenarios above are exercised.
 
 ## Current decision
 
