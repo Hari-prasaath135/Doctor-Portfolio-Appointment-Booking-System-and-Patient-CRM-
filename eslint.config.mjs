@@ -7,11 +7,9 @@ const eslintConfig = defineConfig([
   ...nextTs,
   {
     rules: {
-      // Existing repository debt is reported while CI continues to the
-      // production build. These should be fixed incrementally, not hidden.
+      // Keep existing any-usage visible as a warning while CI continues
+      // to enforce a production build. Reduce this debt incrementally.
       "@typescript-eslint/no-explicit-any": "warn",
-      "react-hooks/set-state-in-effect": "warn",
-      "react-hooks/preserve-manual-memoization": "warn",
     },
   },
   globalIgnores([
