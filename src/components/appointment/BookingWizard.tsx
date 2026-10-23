@@ -1067,7 +1067,7 @@ export default function BookingWizard() {
                       Razorpay Payment ID: <code>{paymentConfirmed.paymentId}</code>
                     </p>
                     <p className="text-xs text-emerald-700">
-                      A confirmation email has been dispatched to your email address ({booking.email || currentUser?.email}).
+                      Your confirmation email will be sent to {booking.email || currentUser?.email} when email delivery is configured. If it does not arrive, please contact the clinic.
                     </p>
                   </div>
                 )}
