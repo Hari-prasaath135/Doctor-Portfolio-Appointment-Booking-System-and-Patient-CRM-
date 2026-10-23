@@ -155,6 +155,7 @@ function buildEmailHtml(
  * - Send email notifications via Nodemailer + Gmail SMTP
  */
 export class NotificationService {
+  private isProcessingOutbox = false;
   /**
    * Create an in-app notification in Firestore.
    */
@@ -537,7 +538,13 @@ export class NotificationService {
    * Delivers confirmation emails with bounded retries outside of the transaction.
    */
   async processOutboxQueue(): Promise<{ processed: number; failures: number }> {
-    const snap = await db
+    if (this.isProcessingOutbox) {
+      return { processed: 0, failures: 0 };
+    }
+
+    this.isProcessingOutbox = true;
+    try {
+      const snap = await db
       .collection(collections.notificationOutbox)
       .where('status', 'in', ['PENDING', 'RETRY'])
       .limit(10)
@@ -593,7 +600,10 @@ export class NotificationService {
       }
     }
 
-    return { processed, failures };
+      return { processed, failures };
+    } finally {
+      this.isProcessingOutbox = false;
+    }
   }
 }
 
