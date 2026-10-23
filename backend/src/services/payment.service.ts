@@ -432,6 +432,7 @@ export class PaymentService {
       const orderId = paymentEntity?.order_id;
       const paymentId = paymentEntity?.id;
       const amount = paymentEntity?.amount;
+      const currency = paymentEntity?.currency;
 
       if (!orderId) {
         logger.warn('Webhook payment.captured missing order_id');
@@ -451,39 +452,52 @@ export class PaymentService {
 
       if (!paymentSnap.empty) {
         const paymentDoc = paymentSnap.docs[0];
-        const pData = paymentDoc.data() as Payment;
+        const pData = paymentSnap.docs[0].data() as Payment;
 
-        const now = admin.firestore.FieldValue.serverTimestamp();
-        await paymentDoc.ref.update({
-          status: 'CAPTURED',
-          paymentId,
-          webhookReceived: true,
-          capturedAt: now,
-          paidAt: now,
-          updatedAt: now,
-        });
-
-        // Trigger atomic confirmation
-        const confirmResult = await appointmentService.confirmAppointmentWithPayment(
-          pData.appointmentId,
-          paymentDoc.id,
-          amount || pData.amount,
-          'INR'
-        );
-
-        if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
-          logger.error(
-            `Webhook confirmation reconciliation required for appointment ${pData.appointmentId}: ${confirmResult.reason}`
-          );
+        // Never confirm or mark a payment captured based on a mismatched webhook payload.
+        if (!paymentId || amount !== pData.amount || currency !== 'INR') {
+          const reason = `Webhook amount/currency/payment ID mismatch for order ${orderId}`;
+          logger.error(reason);
           await paymentDoc.ref.update({
             status: 'RECONCILIATION_REQUIRED',
-            errorMetadata: { reason: confirmResult.reason },
+            webhookReceived: true,
+            errorMetadata: { reason, receivedAmount: amount, receivedCurrency: currency },
             updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           });
-        }
+        } else {
+          const now = admin.firestore.FieldValue.serverTimestamp();
+          await paymentDoc.ref.update({
+            status: 'CAPTURED',
+            paymentId,
+            webhookReceived: true,
+            capturedAt: now,
+            paidAt: now,
+            updatedAt: now,
+          });
 
-        // Trigger notification queue
-        notificationService.processOutboxQueue().catch(() => {});
+          // Trigger atomic confirmation only after the event matches the stored order.
+          const confirmResult = await appointmentService.confirmAppointmentWithPayment(
+            pData.appointmentId,
+            paymentDoc.id,
+            amount,
+            currency
+          );
+
+          if (confirmResult.status === 'RECONCILIATION_REQUIRED') {
+            logger.error(
+              `Webhook confirmation reconciliation required for appointment ${pData.appointmentId}: ${confirmResult.reason}`
+            );
+            await paymentDoc.ref.update({
+              status: 'RECONCILIATION_REQUIRED',
+              errorMetadata: { reason: confirmResult.reason },
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
+
+          notificationService.processOutboxQueue().catch((err) => {
+            logger.error('Webhook notification outbox processing failed', err);
+          });
+        }
       }
     } else if (eventType === 'payment.failed') {
       const paymentEntity = eventPayload?.payload?.payment?.entity;
