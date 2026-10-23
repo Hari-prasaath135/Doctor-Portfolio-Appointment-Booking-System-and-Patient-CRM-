@@ -1,7 +1,8 @@
 import nodemailer from 'nodemailer';
 import { db, collections, admin } from '../config/firebase';
 import { Notification, NotificationType } from '../types';
-import { NotFoundError, ForbiddenError } from '../utils/errors';
+import { NotFoundError } from '../utils/errors';
+import { assertNotificationOwner } from '../utils/notification-access';
 import { logger } from '../utils/logger';
 import { v4 as uuid } from 'uuid';
 
@@ -215,9 +216,7 @@ export class NotificationService {
       throw new NotFoundError('Notification');
     }
 
-    if (snap.data()?.userId !== userId) {
-      throw new ForbiddenError('You can only mark your own notifications as read');
-    }
+    assertNotificationOwner(snap.data()?.userId, userId);
 
     await ref.update({ isRead: true });
   }
