@@ -57,12 +57,30 @@ The latest backend CI run executed **54 unit tests: 54 passed, 0 failed**. Cover
 
 The goal is to produce an evidence-backed quality report and verify critical workflows in an isolated test environment. Do not add another test that duplicates an already-covered pure helper; new work should close a named gap below.
 
+### Current phase: Phase 1 — appointment and availability integrity
+
+**Status: IN PROGRESS.** Code changes are on the separate branch, and the newest branch-head CI is pending.
+
+Completed in this phase so far:
+- Cancellation now uses one Firestore transaction to update appointment status and release the associated slot together.
+- Cancellation checks slot ownership before release, so a slot reassigned to another appointment/patient is not freed.
+- Booking rechecks that the schedule is still published and not a leave schedule inside the booking transaction, and uses the current schedule fee rather than a stale pre-transaction fee.
+- Added four unit tests for safe slot-release ownership (matching ownership, legacy metadata, different appointment, different patient).
+
+Still required before Phase 1 is complete:
+- Confirm current branch-head TypeScript build and full unit suite pass; the four new slot-ownership tests are not counted as passed until CI confirms them.
+- Add deterministic transaction-level tests for cancellation, concurrent booking, and rescheduling (mocked Firestore or emulator, without production data).
+- Inspect legacy availability replacement for any path that could overwrite booked/blocked slots.
+- Exercise the lifecycle end-to-end in a dedicated test environment if emulator/configuration is available.
+
+Phase 1 exit criteria remain: conflicting bookings cannot both succeed; cancellation and rescheduling leave appointment and slot state consistent; unavailable/unpublished schedules cannot be booked; and the evidence report links to passing checks.
+
 | Workstream | State | Exit criterion |
 |---|---|---|
 | CI baseline: frontend lint/build and backend build/unit suite | COMPLETE | Current branch-head CI passes |
 | Unit tests: errors/responses, role middleware, time/identity, appointment access, signature handling, webhook claim decisions, payment payload validation, notification ownership | COMPLETE | 54 tests pass, 0 fail |
 | Frontend lint debt | OPEN, non-blocking | Prioritize correctness/accessibility warnings; do not mass-suppress warnings |
-| Appointment/availability integration | NEXT | Isolated tests prove one winner for concurrent slot booking, valid published slots only, cancellation releases slot, and reschedule updates old/new slots atomically |
+| Appointment/availability integrity | IN PROGRESS | Atomic cancellation and booking revalidation changes committed; new slot-ownership tests added but branch-head CI pending; transaction/concurrency integration tests remain |
 | Payment/webhook integration | AFTER appointment integration | Mocked/provider-test scenarios prove invalid signature rejection, amount/currency mismatch reconciliation, replay idempotency, failed-event retry, and no double confirmation/notification |
 | Email/outbox integration | AFTER payment flow | Simulated SMTP failure is observable/retriable; successful confirmation sends to the patient; checkout UI always exits processing state |
 | Admin/doctor dashboard consistency | AFTER persisted lifecycle tests | Create/update/cancel a test appointment and assert both dashboards read the same persisted state |
@@ -103,4 +121,4 @@ These have **not** been proven by the isolated unit tests or build checks. Run t
 
 ## Current decision
 
-**Testing only — no deployment, no merge, and no production changes.** Current baseline is green at 54 backend unit tests, frontend lint, and frontend production build. Next work is appointment/availability integration, not another round of the same unit tests. Keep all fixes on `chore/ci-and-repo-hardening` and keep PR #1 open until the remaining critical integration checks have evidence.
+**Testing only — no deployment, no merge, and no production changes.** Last fully verified baseline was 54 backend unit tests, frontend lint, and frontend production build. Phase 1 changes now include atomic cancellation and in-transaction booking revalidation; the latest branch-head CI is pending, so the updated code and four new slot-ownership tests are not yet marked passed. Keep all fixes on `chore/ci-and-repo-hardening` and keep PR #1 open until the remaining critical integration checks have evidence.
