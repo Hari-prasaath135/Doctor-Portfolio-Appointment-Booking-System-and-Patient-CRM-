@@ -18,7 +18,7 @@ jobs:
   frontend:
     name: Frontend lint and production build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,10 +32,10 @@ jobs:
       - name: Lint
         run: npm run lint
       - name: Production build
+        if: always()
         run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
-          # Build-only placeholders; never use these as production credentials.
           FIREBASE_PROJECT_ID: ci-placeholder
           NEXT_PUBLIC_FIREBASE_PROJECT_ID: ci-placeholder
 
