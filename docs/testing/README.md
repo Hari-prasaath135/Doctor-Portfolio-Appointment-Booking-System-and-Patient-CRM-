@@ -4,10 +4,11 @@
 
 GitHub Actions runs the frontend lint check, Next.js production build, and backend unit tests. The backend test command compiles TypeScript and runs isolated tests with Node's built-in test runner; it does not require Firebase, Razorpay, email credentials, or production data.
 
-Current backend unit tests cover:
+Current automated backend unit tests cover:
 - Custom application error inheritance, messages, and HTTP status codes.
 - Field-level validation error details.
 - Standard success, created, error, paginated, and no-content response helpers.
+- Role middleware: unauthenticated requests, missing role claims, role mismatch, permitted role, and doctor/admin allow-list behavior.
 
 The repository also contains older phase-specific scripts under `backend/src/*-test.ts`. They are not included in the automated suite because some depend on Firebase and external providers. Do not run them against production data.
 
@@ -26,4 +27,4 @@ Run against a dedicated test project and provider test credentials only:
 9. Doctor/admin dashboards read the same persisted appointment/payment state.
 10. Refund, cancelled checkout, and abandoned reservation cleanup paths behave correctly.
 
-These Firebase, payment, email, and dashboard integration flows are not claimed as passed by the isolated unit tests. They require a dedicated integration-test environment and further mocking/test setup.
+These Firebase, payment, email, availability-concurrency, and dashboard integration flows are not claimed as passed by the isolated unit tests. They require a dedicated integration-test environment and further mocking/test setup.
