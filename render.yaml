@@ -14,7 +14,10 @@ services:
       - key: NODE_ENV
         value: production
       - key: FRONTEND_URL
-        sync: false
+        fromService:
+          name: dr-vijai-frontend
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
       - key: FIREBASE_PROJECT_ID
         sync: false
       - key: FIREBASE_CLIENT_EMAIL
@@ -43,9 +46,3 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: FIREBASE_PROJECT_ID
-        sync: false
-      - key: FIREBASE_CLIENT_EMAIL
-        sync: false
-      - key: FIREBASE_PRIVATE_KEY
-        sync: false
