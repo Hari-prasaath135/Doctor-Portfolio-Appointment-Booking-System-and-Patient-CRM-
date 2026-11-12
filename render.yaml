@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: dr-vijai-api
+    runtime: node
+    plan: free
+    region: singapore
+    branch: deploy/render-production-setup
+    rootDir: backend
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: RAZORPAY_MODE
+        value: test
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+
+  - type: web
+    name: dr-vijai-frontend
+    runtime: node
+    plan: free
+    region: singapore
+    branch: deploy/render-production-setup
+    rootDir: .
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
