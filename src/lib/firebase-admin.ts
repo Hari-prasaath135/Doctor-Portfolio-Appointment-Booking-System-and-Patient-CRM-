@@ -1,15 +1,27 @@
-import { initializeApp, getApps, cert, App } from "firebase-admin/app";
+import { applicationDefault, cert, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import serviceAccount from "@/firebase-service-account.json";
 
-let app: App;
+function getAdminApp(): App {
+  if (getApps().length > 0) {
+    return getApps()[0];
+  }
 
-if (!getApps().length) {
-  app = initializeApp({
-    credential: cert(serviceAccount as any),
+  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+  // Prefer explicit service-account credentials in hosted environments.
+  // Application Default Credentials remain available for local/cloud environments
+  // that provide them through the standard Google credential mechanism.
+  const credential =
+    projectId && clientEmail && privateKey
+      ? cert({ projectId, clientEmail, privateKey })
+      : applicationDefault();
+
+  return initializeApp({
+    credential,
+    ...(projectId ? { projectId } : {}),
   });
-} else {
-  app = getApps()[0];
 }
 
-export const adminDb = getFirestore(app);
+export const adminDb = getFirestore(getAdminApp());
